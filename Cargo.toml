@@ -2,6 +2,7 @@
 name = "levelize"
 version = "0.1.0"
 edition = "2024"
+default-run = "levelize"
 rust-version = "1.85"
 description = "Adaptive loudness leveling for spoken-word audio — a modern Levelator as a CLI"
 repository = "https://github.com/FreedomBen/levelize"
