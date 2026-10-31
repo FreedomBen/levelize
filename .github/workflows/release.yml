@@ -1,0 +1,119 @@
+name: Release
+
+# Builds release binaries when a v* tag is pushed and attaches them to a
+# GitHub release. `workflow_dispatch` runs the build jobs only (no release),
+# as a dry run. Publishing to crates.io stays manual — see RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: universal-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'universal-apple-darwin' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        shell: bash
+        run: |
+          mkdir -p target/dist
+          case "${TARGET}" in
+            universal-apple-darwin)
+              cargo build --release --target aarch64-apple-darwin
+              cargo build --release --target x86_64-apple-darwin
+              lipo -create -output target/dist/levelize \
+                target/aarch64-apple-darwin/release/levelize \
+                target/x86_64-apple-darwin/release/levelize
+              ;;
+            *windows*)
+              cargo build --release --target "${TARGET}"
+              cp "target/${TARGET}/release/levelize.exe" target/dist/
+              ;;
+            *)
+              cargo build --release --target "${TARGET}"
+              cp "target/${TARGET}/release/levelize" target/dist/
+              ;;
+          esac
+
+      - name: Generate man page
+        if: ${{ !contains(matrix.target, 'windows') }}
+        run: cargo run --release --features mangen --bin levelize-man > target/dist/levelize.1
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] || version="dev"
+          name="levelize-${version}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp target/dist/* README.md LICENSE CHANGELOG.md "dist/${name}/"
+          cd dist
+          if [[ "${TARGET}" == *windows* ]]; then
+            7z a "${name}.zip" "${name}" > /dev/null
+          else
+            tar czf "${name}.tar.gz" "${name}"
+          fi
+          rm -r "${name}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: >
+            Prebuilt binaries for Linux (static musl, x86_64 and aarch64),
+            macOS (universal), and Windows. Each archive carries the binary,
+            man page (not on Windows), README, LICENSE, and CHANGELOG.
+            Details in
+            [CHANGELOG.md](https://github.com/FreedomBen/levelize/blob/main/CHANGELOG.md).

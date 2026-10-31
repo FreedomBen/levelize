@@ -8,95 +8,8 @@ use clap::{CommandFactory, Parser};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use tempfile::NamedTempFile;
 
-use levelize::{
-    AnalyzeReport, BitDepth, Format, LevelReport, Leveling, Output, Phase, Profile, Settings,
-};
-
-/// Adaptive loudness leveling for spoken-word audio.
-///
-/// Levels speech between and within speakers — quiet voices up, loud voices
-/// down, pauses left alone — then lands the result on a standard loudness
-/// target under a true-peak ceiling. `levelize episode.wav` writes
-/// `episode.leveled.wav` next to the input.
-#[derive(Parser, Debug)]
-#[command(
-    version,
-    about,
-    after_help = "\
-Examples:
-  levelize episode.wav                      write episode.leveled.wav at the podcast target
-  levelize --profile audiobook book.flac    ACX-friendly: -20 LUFS under a -3 dBTP ceiling
-  levelize ep.mp3 -o ep.leveled.mp3         MP3 in and out (MP3 output runs `lame`)
-  levelize --analyze *.wav                  measure only; write nothing
-  levelize --json ep.wav | jq .gain         machine-readable stats on stdout
-  cat ep.wav | levelize - -o - > out.wav    filter mode: stdin to stdout"
-)]
-struct Cli {
-    /// Input files; `-` reads stdin
-    #[arg(required = true, value_name = "INPUT")]
-    inputs: Vec<PathBuf>,
-
-    /// Output file, or `-` for stdout (single input only)
-    #[arg(short, long, value_name = "PATH")]
-    output: Option<PathBuf>,
-
-    /// Output format [default: from the -o extension, else wav]
-    #[arg(long, value_enum, value_name = "FMT")]
-    format: Option<Format>,
-
-    /// Loudness preset for target and ceiling
-    #[arg(long, value_enum, default_value = "podcast", value_name = "NAME")]
-    profile: Profile,
-
-    /// Integrated loudness target in LUFS; overrides the profile
-    #[arg(long, value_name = "LUFS", allow_negative_numbers = true)]
-    target: Option<f64>,
-
-    /// True-peak ceiling in dBTP; overrides the profile
-    #[arg(long, value_name = "DBTP", allow_negative_numbers = true)]
-    ceiling: Option<f64>,
-
-    /// Cap on upward gain in dB (protects the noise floor)
-    #[arg(long, value_name = "DB", default_value_t = 15.0)]
-    max_boost: f64,
-
-    /// Cap on downward gain in dB
-    #[arg(long, value_name = "DB", default_value_t = 15.0)]
-    max_cut: f64,
-
-    /// How hard levels converge on the target
-    #[arg(long, value_enum, default_value = "normal", value_name = "MODE")]
-    leveling: Leveling,
-
-    /// Output sample format for WAV/FLAC [default: match the input]
-    #[arg(long, value_enum, value_name = "DEPTH")]
-    bit_depth: Option<BitDepth>,
-
-    /// CBR bitrate for MP3 output [default: 128 stereo / 96 mono]
-    #[arg(long, value_name = "KBPS")]
-    mp3_bitrate: Option<u32>,
-
-    /// Analysis pass only: print loudness stats, write nothing
-    #[arg(long, conflicts_with = "output")]
-    analyze: bool,
-
-    /// Stats as JSON, one object per input, on stdout
-    /// (on stderr when audio streams to stdout)
-    #[arg(long, verbatim_doc_comment)]
-    json: bool,
-
-    /// Allow overwriting an existing output file
-    #[arg(long)]
-    force: bool,
-
-    /// Errors only on stderr
-    #[arg(short, long, conflicts_with = "verbose")]
-    quiet: bool,
-
-    /// Detailed progress on stderr
-    #[arg(short, long)]
-    verbose: bool,
-}
+use levelize::cli::Cli;
+use levelize::{AnalyzeReport, BitDepth, Format, LevelReport, Output, Phase, Settings};
 
 /// Cross-argument rules clap can't express; `Err` values are usage errors.
 fn validate_args(cli: &Cli) -> Result<Format, String> {
@@ -419,6 +332,8 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use levelize::{Leveling, Profile};
+
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {

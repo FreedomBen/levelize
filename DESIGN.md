@@ -346,10 +346,14 @@ Decoding twice instead of caching PCM is the deliberate trade: a 3-hour stereo f
 
 ## Distribution
 
-- `cargo install levelize`; prebuilt release binaries from CI (Linux musl static, macOS
-  universal, Windows).
-- Man page generated from clap; `--help` is the primary doc surface.
-- Semver; `0.x` until the algorithm tuning settles.
+- `cargo install levelize`; prebuilt release binaries from CI on `v*` tags (Linux musl
+  static x86_64/aarch64, macOS universal, Windows), checksummed and attached to the GitHub
+  release. The release checklist lives in RELEASING.md; crates.io publishing is manual.
+- Man page generated from clap via `clap_mangen` behind the `mangen` feature (`make man`
+  → `doc/levelize.1`, shipped in the release archives); `--help` is the primary doc
+  surface. `make install` places binary and man page under `PREFIX` (default
+  `/usr/local`).
+- Semver; `0.x` until the algorithm tuning settles. Changes tracked in CHANGELOG.md.
 - Crate name `levelize` confirmed available on crates.io (Oct 2026).
 
 ## License
@@ -375,7 +379,9 @@ publish to crates.io without issue.
       stdin/stdout mode, polished `--help`, README
 - [x] **M6 — Hardening:** golden tests, edge cases (silence, unreachable target,
       pathological inputs), performance pass against targets
-- [ ] **M7 — Release:** binaries, `cargo install`, man page, v0.1 announcement notes
+- [x] **M7 — Release:** binaries, `cargo install`, man page, v0.1 announcement notes
+      (release workflow, Makefile, CHANGELOG, RELEASING checklist; the tag/publish acts
+      themselves run per RELEASING.md)
 
 ## References
 

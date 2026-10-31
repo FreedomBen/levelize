@@ -6,6 +6,7 @@
 //! encode) land with milestones M1–M4; this crate root holds the shared
 //! configuration surface.
 
+pub mod cli;
 pub mod decode;
 pub mod encode;
 pub mod meter;

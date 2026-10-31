@@ -41,15 +41,26 @@ episode.wav → episode.leveled.wav
 
 ## Installation
 
-Requires a Rust toolchain (edition 2024, rustc 1.85 or newer). MP3 *output*
-additionally needs the `lame` encoder on `PATH` at run time; everything else is
-pure Rust with no system dependencies.
+Prebuilt binaries for Linux (static musl, x86_64/aarch64), macOS (universal),
+and Windows are on the
+[releases page](https://github.com/FreedomBen/levelize/releases); each archive
+carries the binary and the man page. With a Rust toolchain (edition 2024,
+rustc 1.85 or newer):
+
+```bash
+cargo install levelize
+```
+
+Or from a checkout, including the man page (PREFIX defaults to `/usr/local`):
 
 ```bash
 git clone https://github.com/FreedomBen/levelize.git
 cd levelize
-cargo install --path .
+sudo make install
 ```
+
+MP3 *output* additionally needs the `lame` encoder on `PATH` at run time;
+everything else is pure Rust with no system dependencies.
 
 ## Usage
 
@@ -102,9 +113,10 @@ acceptance invariants the tests enforce, is in [DESIGN.md](DESIGN.md).
 ## Development
 
 ```bash
-cargo fmt --check                      # formatting
-cargo clippy --all-targets -- -D warnings  # lints
-cargo test                             # unit + acceptance tests
+make lint         # cargo fmt --check + clippy -D warnings
+make test         # unit + acceptance tests (all features)
+make man          # generate doc/levelize.1 from the CLI definition
+make help         # the full target list
 ```
 
 The test suite includes an EBU Tech 3341/3342 compliance subset for the meter,
