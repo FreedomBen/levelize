@@ -1,11 +1,16 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use tempfile::NamedTempFile;
 
-use levelize::{BitDepth, Format, LevelReport, Leveling, Output, Profile, Settings};
+use levelize::{
+    AnalyzeReport, BitDepth, Format, LevelReport, Leveling, Output, Phase, Profile, Settings,
+};
 
 /// Adaptive loudness leveling for spoken-word audio.
 ///
@@ -14,7 +19,18 @@ use levelize::{BitDepth, Format, LevelReport, Leveling, Output, Profile, Setting
 /// target under a true-peak ceiling. `levelize episode.wav` writes
 /// `episode.leveled.wav` next to the input.
 #[derive(Parser, Debug)]
-#[command(version, about)]
+#[command(
+    version,
+    about,
+    after_help = "\
+Examples:
+  levelize episode.wav                      write episode.leveled.wav at the podcast target
+  levelize --profile audiobook book.flac    ACX-friendly: -20 LUFS under a -3 dBTP ceiling
+  levelize ep.mp3 -o ep.leveled.mp3         MP3 in and out (MP3 output runs `lame`)
+  levelize --analyze *.wav                  measure only; write nothing
+  levelize --json ep.wav | jq .gain         machine-readable stats on stdout
+  cat ep.wav | levelize - -o - > out.wav    filter mode: stdin to stdout"
+)]
 struct Cli {
     /// Input files; `-` reads stdin
     #[arg(required = true, value_name = "INPUT")]
@@ -64,8 +80,9 @@ struct Cli {
     #[arg(long, conflicts_with = "output")]
     analyze: bool,
 
-    /// Emit stats as JSON on stdout
-    #[arg(long)]
+    /// Stats as JSON, one object per input, on stdout
+    /// (on stderr when audio streams to stdout)
+    #[arg(long, verbatim_doc_comment)]
     json: bool,
 
     /// Allow overwriting an existing output file
@@ -155,23 +172,62 @@ fn run(cli: &Cli, settings: &Settings) -> Result<()> {
             cli.inputs, cli.output, cli.analyze, cli.json, cli.force, cli.quiet
         );
     }
-    if cli.json {
-        bail!("--json lands with M5 (see DESIGN.md milestones)");
-    }
     if cli.analyze {
-        return analyze_all(&cli.inputs);
+        return analyze_all(cli);
     }
     level_all(cli, settings)
 }
 
+/// An input path the two passes can reread: `-` spills stdin to a temp file.
+struct ResolvedInput {
+    path: PathBuf,
+    stdin: bool,
+    /// Keeps the spill file alive (and deleted afterwards).
+    _spill: Option<NamedTempFile>,
+}
+
+fn resolve_input(input: &Path) -> Result<ResolvedInput> {
+    if input.as_os_str() != "-" {
+        return Ok(ResolvedInput {
+            path: input.to_owned(),
+            stdin: false,
+            _spill: None,
+        });
+    }
+    let mut spill = tempfile::Builder::new()
+        .prefix("levelize-stdin-")
+        .tempfile()
+        .context("creating a temp file for stdin")?;
+    std::io::copy(&mut std::io::stdin().lock(), spill.as_file_mut())
+        .context("spilling stdin to a temp file")?;
+    Ok(ResolvedInput {
+        path: spill.path().to_owned(),
+        stdin: true,
+        _spill: Some(spill),
+    })
+}
+
 /// Level each input independently; report per-file errors and keep going.
 fn level_all(cli: &Cli, settings: &Settings) -> Result<()> {
+    let to_stdout = cli.output.as_deref().is_some_and(|p| p.as_os_str() == "-");
     let mut failures = 0usize;
     for input in &cli.inputs {
         match level_one(cli, settings, input) {
             Ok(report) => {
-                if !cli.quiet {
+                if cli.json {
+                    let line = report.to_json(settings);
+                    if to_stdout {
+                        eprintln!("{line}");
+                    } else {
+                        println!("{line}");
+                    }
+                } else if !cli.quiet {
                     eprintln!("{report}");
+                }
+                if cli.json || cli.quiet {
+                    for warning in report.warnings() {
+                        eprintln!("levelize: {}: warning: {warning}", input.display());
+                    }
                 }
             }
             Err(error) => {
@@ -187,23 +243,85 @@ fn level_all(cli: &Cli, settings: &Settings) -> Result<()> {
 }
 
 fn level_one(cli: &Cli, settings: &Settings, input: &Path) -> Result<LevelReport> {
-    if input.as_os_str() == "-" {
-        bail!("reading stdin lands with M5 (see DESIGN.md milestones)");
-    }
-    if cli.output.as_deref().is_some_and(|p| p.as_os_str() == "-") {
-        return levelize::level(input, Output::Stdout, settings);
-    }
-    let output = match cli.output.as_deref() {
-        Some(path) => path.to_owned(),
-        None => default_output_path(input, settings.format),
+    let resolved = resolve_input(input)?;
+    let bar = progress_bar(cli);
+    let progress = |phase: Phase, done: f64, total: Option<f64>| {
+        if let Some(bar) = &bar {
+            drive_bar(bar, phase, done, total);
+        }
     };
-    check_output_path(input, &output, cli.force)?;
-    let result = levelize::level(input, Output::File(&output), settings);
-    if result.is_err() {
-        // Best effort: don't leave a partial file behind.
-        let _ = std::fs::remove_file(&output);
+
+    let to_stdout = cli.output.as_deref().is_some_and(|p| p.as_os_str() == "-");
+    let mut result = if to_stdout {
+        levelize::level_with_progress(&resolved.path, Output::Stdout, settings, progress)
+    } else {
+        let output = match cli.output.as_deref() {
+            Some(path) => path.to_owned(),
+            None => default_output_path(input, settings.format),
+        };
+        check_output_path(&resolved.path, &output, cli.force)?;
+        let result = levelize::level_with_progress(
+            &resolved.path,
+            Output::File(&output),
+            settings,
+            progress,
+        );
+        if result.is_err() {
+            // Best effort: don't leave a partial file behind.
+            let _ = std::fs::remove_file(&output);
+        }
+        result
+    };
+    if let Some(bar) = &bar {
+        bar.finish_and_clear();
+    }
+    if resolved.stdin
+        && let Ok(report) = &mut result
+    {
+        report.input.path = PathBuf::from("-");
     }
     result
+}
+
+/// A stderr progress bar, unless quiet or stderr isn't a terminal.
+fn progress_bar(cli: &Cli) -> Option<ProgressBar> {
+    if cli.quiet || !std::io::stderr().is_terminal() {
+        return None;
+    }
+    let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+    bar.set_style(
+        ProgressStyle::with_template("{spinner} {msg:>9} {elapsed}").expect("static template"),
+    );
+    Some(bar)
+}
+
+/// Feed one `level_with_progress` callback into the bar. Positions are in
+/// tenths of a second; the two passes split the bar half and half.
+fn drive_bar(bar: &ProgressBar, phase: Phase, done_secs: f64, total_secs: Option<f64>) {
+    const SCALE: f64 = 10.0;
+    bar.set_message(match phase {
+        Phase::Analyze => "analyzing",
+        Phase::Render => "rendering",
+    });
+    match total_secs {
+        Some(total) => {
+            let length = ((2.0 * total * SCALE) as u64).max(1);
+            if bar.length() != Some(length) {
+                bar.set_style(
+                    ProgressStyle::with_template("{msg:>9} [{wide_bar}] {percent:>3}%  {eta}")
+                        .expect("static template")
+                        .progress_chars("=> "),
+                );
+                bar.set_length(length);
+            }
+            let offset = match phase {
+                Phase::Analyze => 0.0,
+                Phase::Render => total,
+            };
+            bar.set_position(((offset + done_secs) * SCALE) as u64);
+        }
+        None => bar.set_position((done_secs * SCALE) as u64),
+    }
 }
 
 /// `dir/episode.wav` → `dir/episode.leveled.<ext>`.
@@ -231,21 +349,20 @@ fn check_output_path(input: &Path, output: &Path, force: bool) -> Result<()> {
 }
 
 /// Analyze each input independently; report per-file errors and keep going.
-fn analyze_all(inputs: &[PathBuf]) -> Result<()> {
+fn analyze_all(cli: &Cli) -> Result<()> {
     let mut failures = 0usize;
-    for (index, input) in inputs.iter().enumerate() {
-        if index > 0 {
+    for (index, input) in cli.inputs.iter().enumerate() {
+        if index > 0 && !cli.json {
             println!();
         }
-        let result = if input.as_os_str() == "-" {
-            Err(anyhow!(
-                "reading stdin lands with M5 (see DESIGN.md milestones)"
-            ))
-        } else {
-            levelize::analyze(input)
-        };
-        match result {
-            Ok(report) => println!("{report}"),
+        match analyze_one(input) {
+            Ok(report) => {
+                if cli.json {
+                    println!("{}", report.to_json());
+                } else {
+                    println!("{report}");
+                }
+            }
             Err(error) => {
                 failures += 1;
                 eprintln!("levelize: {}: {error:#}", input.display());
@@ -253,9 +370,21 @@ fn analyze_all(inputs: &[PathBuf]) -> Result<()> {
         }
     }
     if failures > 0 {
-        bail!("{failures} of {} input(s) failed to analyze", inputs.len());
+        bail!(
+            "{failures} of {} input(s) failed to analyze",
+            cli.inputs.len()
+        );
     }
     Ok(())
+}
+
+fn analyze_one(input: &Path) -> Result<AnalyzeReport> {
+    let resolved = resolve_input(input)?;
+    let mut report = levelize::analyze(&resolved.path)?;
+    if resolved.stdin {
+        report.path = PathBuf::from("-");
+    }
+    Ok(report)
 }
 
 fn main() -> ExitCode {

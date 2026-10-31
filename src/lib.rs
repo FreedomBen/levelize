@@ -219,9 +219,30 @@ fn resolve_bit_depth(settings: &Settings, source: Option<BitDepth>) -> Result<Bi
     Ok(depth)
 }
 
+/// Where a [`level_with_progress`] callback currently is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Pass 1: measuring and planning.
+    Analyze,
+    /// Pass 2: rendering the output.
+    Render,
+}
+
 /// Level one input: measure and plan the gain curve (pass 1), then
 /// re-decode, apply the curve, limit true peaks, and encode (pass 2).
 pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<LevelReport> {
+    level_with_progress(input, output, settings, |_, _, _| {})
+}
+
+/// [`level`], reporting progress as `(phase, seconds decoded, total seconds
+/// if known)`. The total is exact in the render phase; in the analyze phase
+/// it is whatever the container declares.
+pub fn level_with_progress(
+    input: &Path,
+    output: Output<'_>,
+    settings: &Settings,
+    mut progress: impl FnMut(Phase, f64, Option<f64>),
+) -> Result<LevelReport> {
     if settings.format == Format::Mp3 {
         encode::check_lame()?;
     }
@@ -229,8 +250,15 @@ pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<Le
     let decoder = decode::Decoder::open(input)?;
     let info = *decoder.info();
     let tags = decoder.tags().clone();
+    let rate = f64::from(info.sample_rate);
+    let declared_secs = info.total_frames.map(|frames| frames as f64 / rate);
     let mut analyzer = plan::Analyzer::new(info.sample_rate, info.channels)?;
-    decoder.stream(|chunk| analyzer.feed(chunk))?;
+    let mut decoded: u64 = 0;
+    decoder.stream(|chunk| {
+        decoded += (chunk.len() / usize::from(info.channels)) as u64;
+        progress(Phase::Analyze, decoded as f64 / rate, declared_secs);
+        analyzer.feed(chunk)
+    })?;
     let analysis = analyzer.finish()?;
     let frames = analysis.frames;
     let input_loudness = analysis.loudness;
@@ -273,6 +301,8 @@ pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<Le
 
     let decoder = decode::Decoder::open(input)?;
     let channels = usize::from(info.channels);
+    let total_secs = frames as f64 / rate;
+    let mut rendered: u64 = 0;
     let mut gained: Vec<f32> = Vec::new();
     decoder.stream(|chunk| {
         gained.clear();
@@ -280,6 +310,8 @@ pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<Le
             let gain = sampler.next_gain();
             gained.extend(frame.iter().map(|s| (f64::from(*s) * gain) as f32));
         }
+        rendered += (chunk.len() / channels) as u64;
+        progress(Phase::Render, rendered as f64 / rate, Some(total_secs));
         limiter.process(&gained, |limited| {
             out_meter.feed(limited)?;
             writer.write_frames(limited)

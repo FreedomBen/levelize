@@ -127,7 +127,11 @@ a −3 dBTP ceiling lands typical speech comfortably within those bounds.
 | 1    | Runtime failure (decode error, I/O, overwrite refused) |
 | 2    | Usage error (bad flags/arguments)               |
 
-### `--json` output sketch
+### `--json` output
+
+One JSON object per input, one per line (NDJSON — `jq` reads it directly). Loudness values
+are `null` where the measurement is −∞ (digital silence). `--analyze --json` emits only the
+`levelize` and `input` fields.
 
 ```json
 {
@@ -135,12 +139,12 @@ a −3 dBTP ceiling lands typical speech comfortably within those bounds.
   "input":    { "path": "ep12.flac", "duration_s": 3722.4, "sample_rate": 48000,
                 "channels": 2, "integrated_lufs": -23.4, "lra_lu": 11.2,
                 "true_peak_dbtp": -3.1 },
-  "output":   { "path": "ep12.leveled.wav", "integrated_lufs": -16.1, "lra_lu": 4.8,
-                "true_peak_dbtp": -1.5 },
-  "gain":     { "static_trim_db": 1.9, "min_db": -6.2, "max_db": 11.0 },
+  "output":   { "path": "ep12.leveled.wav", "integrated_lufs": -16.0, "lra_lu": 4.8,
+                "true_peak_dbtp": -1.6 },
+  "gain":     { "median_db": 7.2, "min_db": -1.9, "max_db": 11.0 },
   "settings": { "profile": "podcast", "target_lufs": -16.0, "ceiling_dbtp": -1.5,
                 "leveling": "normal", "format": "wav" },
-  "warnings": []
+  "warnings": ["gain capped at +15.0 dB; the -16.0 LUFS target was not reached"]
 }
 ```
 
@@ -264,8 +268,9 @@ nonstandard tags are not carried over in v1.
 | `flacenc`    | FLAC encoding (pure Rust)                                   |
 | `clap`       | CLI parsing (derive), usage errors → exit 2                 |
 | `indicatif`  | Progress bar                                                |
-| `serde` / `serde_json` | `--json` output                                   |
-| `anyhow` / `thiserror` | Error handling (app / library split)              |
+| `serde_json` | `--json` output                                             |
+| `tempfile`   | Stdin spilled to a rereadable temp file; test fixtures      |
+| `anyhow`     | Error handling                                              |
 
 No runtime dependency on ffmpeg or any system library; the one optional external is the
 `lame` binary for MP3 output, run as a child process. The gain planner, limiter, dither, and
@@ -353,7 +358,7 @@ publish to crates.io without issue.
       the Levelator core; tune with listening tests
 - [x] **M4 — Formats & channels:** symphonia inputs (FLAC/MP3/AAC/Ogg/AIFF), mono/stereo
       auto-targets, multi-file inputs, FLAC output, MP3 output via `lame`, tag copying
-- [ ] **M5 — UX:** progress, `--json`, warnings, exit codes, `--profile` presets,
+- [x] **M5 — UX:** progress, `--json`, warnings, exit codes, `--profile` presets,
       stdin/stdout mode, polished `--help`, README
 - [ ] **M6 — Hardening:** golden tests, edge cases (silence, unreachable target,
       pathological inputs), performance pass against targets
