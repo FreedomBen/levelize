@@ -35,6 +35,47 @@ impl fmt::Display for AnalyzeReport {
     }
 }
 
+/// What a leveling run reports for one input → output pair.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LevelReport {
+    pub input: AnalyzeReport,
+    pub output_name: String,
+    pub output_loudness: Loudness,
+    /// Static gain applied before the limiter, in dB.
+    pub gain_db: f64,
+    /// The wanted gain hit the max-boost/max-cut cap.
+    pub gain_clamped: bool,
+    /// Input gated as silence; passed through with no gain.
+    pub silent_input: bool,
+    pub target_lufs: f64,
+}
+
+impl fmt::Display for LevelReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} → {}", self.input.path.display(), self.output_name)?;
+        writeln!(
+            f,
+            "  integrated   {:.1} → {:.1} LUFS   (gain {:+.1} dB)",
+            self.input.loudness.integrated_lufs, self.output_loudness.integrated_lufs, self.gain_db
+        )?;
+        write!(
+            f,
+            "  true peak    {:.1} → {:.1} dBTP",
+            self.input.loudness.true_peak_dbtp, self.output_loudness.true_peak_dbtp
+        )?;
+        if self.silent_input {
+            write!(f, "\n  note: input gated as silence; no gain applied")?;
+        } else if self.gain_clamped {
+            write!(
+                f,
+                "\n  note: gain capped at {:+.1} dB; the {:.1} LUFS target was not reached",
+                self.gain_db, self.target_lufs
+            )?;
+        }
+        Ok(())
+    }
+}
+
 fn channel_name(channels: u16) -> String {
     match channels {
         1 => "mono".into(),

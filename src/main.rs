@@ -1,11 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Result, anyhow, bail};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
-use levelize::{BitDepth, Format, Leveling, Profile, Settings};
+use levelize::{BitDepth, Format, LevelReport, Leveling, Output, Profile, Settings};
 
 /// Adaptive loudness leveling for spoken-word audio.
 ///
@@ -151,7 +151,73 @@ fn run(cli: &Cli, settings: &Settings) -> Result<()> {
     if cli.analyze {
         return analyze_all(&cli.inputs);
     }
-    bail!("leveling is not implemented yet — rendering lands with M2 (see DESIGN.md milestones)")
+    level_all(cli, settings)
+}
+
+/// Level each input independently; report per-file errors and keep going.
+fn level_all(cli: &Cli, settings: &Settings) -> Result<()> {
+    let mut failures = 0usize;
+    for input in &cli.inputs {
+        match level_one(cli, settings, input) {
+            Ok(report) => {
+                if !cli.quiet {
+                    eprintln!("{report}");
+                }
+            }
+            Err(error) => {
+                failures += 1;
+                eprintln!("levelize: {}: {error:#}", input.display());
+            }
+        }
+    }
+    if failures > 0 {
+        bail!("{failures} of {} input(s) failed", cli.inputs.len());
+    }
+    Ok(())
+}
+
+fn level_one(cli: &Cli, settings: &Settings, input: &Path) -> Result<LevelReport> {
+    if input.as_os_str() == "-" {
+        bail!("reading stdin lands with M5 (see DESIGN.md milestones)");
+    }
+    if cli.output.as_deref().is_some_and(|p| p.as_os_str() == "-") {
+        return levelize::level(input, Output::Stdout, settings);
+    }
+    let output = match cli.output.as_deref() {
+        Some(path) => path.to_owned(),
+        None => default_output_path(input, settings.format),
+    };
+    check_output_path(input, &output, cli.force)?;
+    let result = levelize::level(input, Output::File(&output), settings);
+    if result.is_err() {
+        // Best effort: don't leave a partial file behind.
+        let _ = std::fs::remove_file(&output);
+    }
+    result
+}
+
+/// `dir/episode.wav` → `dir/episode.leveled.<ext>`.
+fn default_output_path(input: &Path, format: Format) -> PathBuf {
+    let ext = match format {
+        Format::Wav => "wav",
+        Format::Flac => "flac",
+        Format::Mp3 => "mp3",
+    };
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+    input.with_file_name(format!("{stem}.leveled.{ext}"))
+}
+
+fn check_output_path(input: &Path, output: &Path, force: bool) -> Result<()> {
+    let absolute_input = std::path::absolute(input).unwrap_or_else(|_| input.to_owned());
+    let absolute_output = std::path::absolute(output).unwrap_or_else(|_| output.to_owned());
+    if absolute_input == absolute_output {
+        // Pass 2 re-reads the input while writing, so this can never be allowed.
+        bail!("output would overwrite the input; choose a different path");
+    }
+    if output.exists() && !force {
+        bail!("{} exists; pass --force to overwrite", output.display());
+    }
+    Ok(())
 }
 
 /// Analyze each input independently; report per-file errors and keep going.
@@ -287,5 +353,38 @@ mod tests {
         assert_eq!(settings.target_lufs, Some(-20.0));
         assert_eq!(settings.max_boost_db, 9.0);
         assert_eq!(settings.target_for(2), -20.0);
+    }
+
+    #[test]
+    fn default_output_names_follow_the_input() {
+        assert_eq!(
+            default_output_path(Path::new("ep.wav"), Format::Wav),
+            PathBuf::from("ep.leveled.wav")
+        );
+        assert_eq!(
+            default_output_path(Path::new("dir/ep.flac"), Format::Mp3),
+            PathBuf::from("dir/ep.leveled.mp3")
+        );
+        assert_eq!(
+            default_output_path(Path::new("noext"), Format::Flac),
+            PathBuf::from("noext.leveled.flac")
+        );
+    }
+
+    #[test]
+    fn output_path_checks_guard_the_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.wav");
+        let output = dir.path().join("out.wav");
+        std::fs::write(&input, b"x").unwrap();
+
+        // Same path is refused even with --force.
+        assert!(check_output_path(&input, &input, true).is_err());
+        // A fresh path is fine.
+        assert!(check_output_path(&input, &output, false).is_ok());
+        // An existing path needs --force.
+        std::fs::write(&output, b"x").unwrap();
+        assert!(check_output_path(&input, &output, false).is_err());
+        assert!(check_output_path(&input, &output, true).is_ok());
     }
 }

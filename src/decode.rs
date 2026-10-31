@@ -12,6 +12,9 @@ use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::sample::SampleFormat;
+
+use crate::BitDepth;
 
 /// Stream properties fixed at open time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +23,8 @@ pub struct InputInfo {
     pub channels: u16,
     /// Total frames when the container declares them (drives progress display).
     pub total_frames: Option<u64>,
+    /// Source bit depth when known; leveled output matches it by default.
+    pub source_depth: Option<BitDepth>,
 }
 
 /// One opened input, ready to stream interleaved f32 chunks.
@@ -73,6 +78,17 @@ impl Decoder {
             );
         }
         let total_frames = track.codec_params.n_frames;
+        let source_depth = match (
+            track.codec_params.sample_format,
+            track.codec_params.bits_per_sample,
+        ) {
+            (Some(SampleFormat::F32 | SampleFormat::F64), _) => Some(BitDepth::Float32),
+            (_, Some(16)) => Some(BitDepth::Int16),
+            (_, Some(24)) => Some(BitDepth::Int24),
+            (_, Some(32)) => Some(BitDepth::Float32),
+            (_, Some(8)) => Some(BitDepth::Int16),
+            _ => None,
+        };
 
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
@@ -86,6 +102,7 @@ impl Decoder {
                 sample_rate,
                 channels: channels as u16,
                 total_frames,
+                source_depth,
             },
         })
     }

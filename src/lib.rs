@@ -7,15 +7,19 @@
 //! configuration surface.
 
 pub mod decode;
+pub mod encode;
 pub mod meter;
+pub mod render;
 pub mod stats;
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 
-pub use stats::AnalyzeReport;
+pub use stats::{AnalyzeReport, LevelReport};
 
 /// Loudness preset: supplies the default target and ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -139,18 +143,110 @@ impl Settings {
     }
 }
 
-/// Pass-1 measurement of one input: decode and meter, write nothing.
-pub fn analyze(path: &Path) -> Result<AnalyzeReport> {
+/// Decode one input end to end and meter it.
+fn measure(path: &Path) -> Result<(decode::InputInfo, u64, meter::Loudness)> {
     let decoder = decode::Decoder::open(path)?;
     let info = *decoder.info();
     let mut meter = meter::Meter::new(info.sample_rate, info.channels)?;
     let frames = decoder.stream(|chunk| meter.feed(chunk))?;
+    Ok((info, frames, meter.finish()?))
+}
+
+/// Pass-1 measurement of one input: decode and meter, write nothing.
+pub fn analyze(path: &Path) -> Result<AnalyzeReport> {
+    let (info, frames, loudness) = measure(path)?;
     Ok(AnalyzeReport {
         path: path.to_owned(),
         duration_secs: frames as f64 / f64::from(info.sample_rate),
         sample_rate: info.sample_rate,
         channels: info.channels,
-        loudness: meter.finish()?,
+        loudness,
+    })
+}
+
+/// Where a leveling run writes its audio.
+#[derive(Debug, Clone, Copy)]
+pub enum Output<'a> {
+    File(&'a Path),
+    Stdout,
+}
+
+/// Level one input: measure (pass 1), then re-decode, apply gain, limit true
+/// peaks, and encode (pass 2). M2 applies a static gain; the adaptive gain
+/// curve lands with M3.
+pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<LevelReport> {
+    if settings.format != Format::Wav {
+        bail!("only WAV output is implemented so far; FLAC and MP3 land with M4");
+    }
+
+    let (info, frames, input_loudness) = measure(input)?;
+    let target_lufs = settings.target_for(info.channels);
+    let silent_input =
+        !input_loudness.integrated_lufs.is_finite() || input_loudness.integrated_lufs <= -70.0;
+    let (gain_db, gain_clamped) = if silent_input {
+        (0.0, false)
+    } else {
+        let wanted = target_lufs - input_loudness.integrated_lufs;
+        let clamped = wanted.clamp(-settings.max_cut_db, settings.max_boost_db);
+        (clamped, clamped != wanted)
+    };
+    let gain = 10f64.powf(gain_db / 20.0);
+
+    let bit_depth = settings
+        .bit_depth
+        .or(info.source_depth)
+        .unwrap_or(BitDepth::Int16);
+    let (sink, output_name): (Box<dyn Write>, String) = match output {
+        Output::File(path) => (
+            Box::new(BufWriter::new(
+                File::create(path).with_context(|| format!("cannot create {}", path.display()))?,
+            )),
+            path.display().to_string(),
+        ),
+        Output::Stdout => (Box::new(BufWriter::new(std::io::stdout())), "-".to_string()),
+    };
+    let mut writer = encode::WavWriter::new(
+        sink,
+        encode::WavSpec {
+            sample_rate: info.sample_rate,
+            channels: info.channels,
+            bit_depth,
+        },
+        frames,
+    )?;
+    let mut out_meter = meter::Meter::new(info.sample_rate, info.channels)?;
+    let mut limiter = render::Limiter::new(info.sample_rate, info.channels, settings.ceiling());
+
+    let decoder = decode::Decoder::open(input)?;
+    let mut gained: Vec<f32> = Vec::new();
+    decoder.stream(|chunk| {
+        gained.clear();
+        gained.extend(chunk.iter().map(|s| (f64::from(*s) * gain) as f32));
+        limiter.process(&gained, |limited| {
+            out_meter.feed(limited)?;
+            writer.write_frames(limited)
+        })
+    })?;
+    limiter.flush(|limited| {
+        out_meter.feed(limited)?;
+        writer.write_frames(limited)
+    })?;
+    writer.finish()?;
+
+    Ok(LevelReport {
+        input: AnalyzeReport {
+            path: input.to_owned(),
+            duration_secs: frames as f64 / f64::from(info.sample_rate),
+            sample_rate: info.sample_rate,
+            channels: info.channels,
+            loudness: input_loudness,
+        },
+        output_name,
+        output_loudness: out_meter.finish()?,
+        gain_db,
+        gain_clamped,
+        silent_input,
+        target_lufs,
     })
 }
 

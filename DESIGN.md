@@ -326,7 +326,7 @@ publish to crates.io without issue.
       cargo project (lib + bin), clap skeleton, `--version`, CI with fmt/clippy/test
 - [x] **M1 — Meter:** WAV decode → `--analyze` reporting integrated/LRA/true peak;
       Tech 3341/3342 tests pass
-- [ ] **M2 — Static pipeline:** fixed-gain normalize → limiter → dither → WAV out;
+- [x] **M2 — Static pipeline:** fixed-gain normalize → limiter → dither → WAV out;
       acceptance invariants green (this is already a useful loudness normalizer)
 - [ ] **M3 — Adaptive leveling:** classification, gain curve, smoothing, static trim —
       the Levelator core; tune with listening tests
