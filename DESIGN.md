@@ -114,7 +114,8 @@ a −3 dBTP ceiling lands typical speech comfortably within those bounds.
   pipes, which the spec allows). With `-o -`, `--json` stats move to stderr.
 - MP3 output shells out to `lame`; if it isn't in `PATH`, fail early with a clear error.
 - Progress bar on a TTY (by decoded duration); suppressed when piped or `--quiet`.
-- Logs and progress go to stderr; stdout carries only `--json` output (or audio with `-o -`).
+- Logs and progress go to stderr; stdout carries only `--analyze` reports, `--json` output,
+  or audio with `-o -`.
 
 ### Exit codes
 
@@ -323,7 +324,7 @@ publish to crates.io without issue.
 
 - [x] **M0 — Scaffold:** git repo housekeeping, AGPLv3 LICENSE file + Cargo.toml metadata,
       cargo project (lib + bin), clap skeleton, `--version`, CI with fmt/clippy/test
-- [ ] **M1 — Meter:** WAV decode → `--analyze` reporting integrated/LRA/true peak;
+- [x] **M1 — Meter:** WAV decode → `--analyze` reporting integrated/LRA/true peak;
       Tech 3341/3342 tests pass
 - [ ] **M2 — Static pipeline:** fixed-gain normalize → limiter → dither → WAV out;
       acceptance invariants green (this is already a useful loudness normalizer)

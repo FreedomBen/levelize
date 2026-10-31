@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
@@ -145,9 +145,41 @@ fn run(cli: &Cli, settings: &Settings) -> Result<()> {
             cli.inputs, cli.output, cli.analyze, cli.json, cli.force, cli.quiet
         );
     }
-    bail!(
-        "nothing past argument parsing is implemented yet — the meter lands with M1 (see DESIGN.md milestones)"
-    )
+    if cli.json {
+        bail!("--json lands with M5 (see DESIGN.md milestones)");
+    }
+    if cli.analyze {
+        return analyze_all(&cli.inputs);
+    }
+    bail!("leveling is not implemented yet — rendering lands with M2 (see DESIGN.md milestones)")
+}
+
+/// Analyze each input independently; report per-file errors and keep going.
+fn analyze_all(inputs: &[PathBuf]) -> Result<()> {
+    let mut failures = 0usize;
+    for (index, input) in inputs.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        let result = if input.as_os_str() == "-" {
+            Err(anyhow!(
+                "reading stdin lands with M5 (see DESIGN.md milestones)"
+            ))
+        } else {
+            levelize::analyze(input)
+        };
+        match result {
+            Ok(report) => println!("{report}"),
+            Err(error) => {
+                failures += 1;
+                eprintln!("levelize: {}: {error:#}", input.display());
+            }
+        }
+    }
+    if failures > 0 {
+        bail!("{failures} of {} input(s) failed to analyze", inputs.len());
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {

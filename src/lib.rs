@@ -6,7 +6,16 @@
 //! encode) land with milestones M1–M4; this crate root holds the shared
 //! configuration surface.
 
+pub mod decode;
+pub mod meter;
+pub mod stats;
+
+use std::path::Path;
+
+use anyhow::Result;
 use clap::ValueEnum;
+
+pub use stats::AnalyzeReport;
 
 /// Loudness preset: supplies the default target and ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -128,6 +137,21 @@ impl Settings {
         self.mp3_bitrate_kbps
             .unwrap_or(if channels == 1 { 96 } else { 128 })
     }
+}
+
+/// Pass-1 measurement of one input: decode and meter, write nothing.
+pub fn analyze(path: &Path) -> Result<AnalyzeReport> {
+    let decoder = decode::Decoder::open(path)?;
+    let info = *decoder.info();
+    let mut meter = meter::Meter::new(info.sample_rate, info.channels)?;
+    let frames = decoder.stream(|chunk| meter.feed(chunk))?;
+    Ok(AnalyzeReport {
+        path: path.to_owned(),
+        duration_secs: frames as f64 / f64::from(info.sample_rate),
+        sample_rate: info.sample_rate,
+        channels: info.channels,
+        loudness: meter.finish()?,
+    })
 }
 
 #[cfg(test)]
