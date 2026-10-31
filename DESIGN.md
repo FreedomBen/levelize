@@ -172,18 +172,37 @@ Pass 2 — render (streaming decode)
 2. **Measure** per BS.1770: K-weighted momentary (400 ms) and short-term (3 s) loudness on a
    100 ms hop, integrated loudness with the R128 two-stage gate (−70 LUFS absolute, −10 LU
    relative), loudness range (LRA), and 4×-oversampled true peak.
-3. **Classify** each hop as *program* (speech) or *pause*. Blocks that survive the R128
-   relative gate are program; everything below the gate or near the estimated noise floor
-   (low percentile of momentary loudness) is pause. This is the guard against the classic
-   AGC failure of amplifying room tone between sentences.
+3. **Classify** each hop as *program* (speech) or *pause*: a hop is pause when its
+   momentary loudness sits at or below `max(−70 LUFS, min(floor + 6 dB, relative gate))`,
+   where the floor is a low percentile (1st) of momentary loudness. This is the guard
+   against the classic AGC failure of amplifying room tone between sentences. The
+   threshold is anchored to the noise floor rather than to the R128 relative gate because
+   the relative gate (integrated − 10 LU) would swallow the quiet half of a two-speaker
+   recording with a wide spread — the exact material this tool exists for; the gate
+   instead *caps* the threshold (nothing above it is ever called pause, protecting
+   against a bad floor estimate), and the −70 LUFS absolute gate is the backstop.
 4. **Raw gain curve.** For program hops: `g[i] = target − S[i]` (short-term loudness),
-   clamped to `[−max_cut, +max_boost]`. For pause hops: hold the last program gain. The 3 s
-   short-term window is the control signal because it tracks speaker-to-speaker differences
-   while ignoring syllable-level dynamics, which we want to keep.
+   clamped to `[−max_cut, +max_boost]`. The 3 s short-term window is the control signal
+   because it tracks speaker-to-speaker differences while ignoring syllable-level
+   dynamics, which we want to keep. The trailing window reads 1.5 s late, so each value
+   is attributed to its window *center* — offline, the plan can react on time. Within a
+   speech run, hops near the edges reuse the nearest fully-in-run window value, keeping
+   pause audio out of the control signal.
 5. **Smooth.** Offline lookahead lets us do what real-time AGC can't: within a continuous
-   speech run the gain is slew-limited to ~2 dB/s (inaudible drift); larger corrections —
-   e.g. a +10 dB jump at a speaker change — are placed *inside pauses* (≥ ~300 ms), where a
-   gain step is inaudible. `--leveling` scales the slew limits and clamps.
+   speech run the gain is slew-limited to ~2 dB/s (inaudible drift) by a forward and a
+   backward tracking pass, averaged — ramps center on the level change instead of lagging
+   it. Larger corrections — e.g. a +10 dB jump at a speaker change — are placed *inside
+   pauses*: the gain holds flat into the pause from both sides and steps once at the
+   pause midpoint, where the 100 ms between control points is the whole (masked) ramp.
+   Pauses too short for a clean jump are ramped across; leading/trailing pauses extend
+   the nearest program gain. `--leveling` scales the slew limit, the gain clamps, and the
+   shortest pause that takes a jump:
+
+   | Mode         | Slew limit | Clamp scale | Jump pauses |
+   | ------------ | ---------- | ----------- | ----------- |
+   | `gentle`     | 1 dB/s     | × 0.6       | ≥ 400 ms    |
+   | `normal`     | 2 dB/s     | × 1.0       | ≥ 300 ms    |
+   | `aggressive` | 4 dB/s     | × 1.0       | ≥ 200 ms    |
 6. **Static trim.** K-weighted block powers from step 2 scale as `10^(g/10)` under gain, so
    the post-leveling integrated loudness is computed analytically (re-running the R128 gate
    on adjusted blocks) without touching samples. The trim `target − predicted` is folded
@@ -328,7 +347,7 @@ publish to crates.io without issue.
       Tech 3341/3342 tests pass
 - [x] **M2 — Static pipeline:** fixed-gain normalize → limiter → dither → WAV out;
       acceptance invariants green (this is already a useful loudness normalizer)
-- [ ] **M3 — Adaptive leveling:** classification, gain curve, smoothing, static trim —
+- [x] **M3 — Adaptive leveling:** classification, gain curve, smoothing, static trim —
       the Levelator core; tune with listening tests
 - [ ] **M4 — Formats & channels:** symphonia inputs (FLAC/MP3/AAC/Ogg/AIFF), mono/stereo
       auto-targets, multi-file inputs, FLAC output, MP3 output via `lame`, tag copying

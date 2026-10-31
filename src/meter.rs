@@ -25,7 +25,7 @@ impl Meter {
         let state = EbuR128::new(
             u32::from(channels),
             sample_rate,
-            Mode::I | Mode::LRA | Mode::TRUE_PEAK,
+            Mode::I | Mode::LRA | Mode::TRUE_PEAK | Mode::M | Mode::S,
         )
         .map_err(meter_error)?;
         Ok(Meter { state, channels })
@@ -34,6 +34,18 @@ impl Meter {
     /// Feed one interleaved chunk of whole frames.
     pub fn feed(&mut self, interleaved: &[f32]) -> Result<()> {
         self.state.add_frames_f32(interleaved).map_err(meter_error)
+    }
+
+    /// Momentary loudness (last 400 ms) in LUFS; `-inf` over silence.
+    /// The window is zero-padded until 400 ms have been fed.
+    pub fn momentary(&self) -> Result<f64> {
+        self.state.loudness_momentary().map_err(meter_error)
+    }
+
+    /// Short-term loudness (last 3 s) in LUFS; `-inf` over silence.
+    /// The window is zero-padded until 3 s have been fed.
+    pub fn short_term(&self) -> Result<f64> {
+        self.state.loudness_shortterm().map_err(meter_error)
     }
 
     /// Final measurements over everything fed so far.

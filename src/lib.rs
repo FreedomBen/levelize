@@ -9,6 +9,7 @@
 pub mod decode;
 pub mod encode;
 pub mod meter;
+pub mod plan;
 pub mod render;
 pub mod stats;
 
@@ -171,26 +172,24 @@ pub enum Output<'a> {
     Stdout,
 }
 
-/// Level one input: measure (pass 1), then re-decode, apply gain, limit true
-/// peaks, and encode (pass 2). M2 applies a static gain; the adaptive gain
-/// curve lands with M3.
+/// Level one input: measure and plan the gain curve (pass 1), then
+/// re-decode, apply the curve, limit true peaks, and encode (pass 2).
 pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<LevelReport> {
     if settings.format != Format::Wav {
         bail!("only WAV output is implemented so far; FLAC and MP3 land with M4");
     }
 
-    let (info, frames, input_loudness) = measure(input)?;
+    let decoder = decode::Decoder::open(input)?;
+    let info = *decoder.info();
+    let mut analyzer = plan::Analyzer::new(info.sample_rate, info.channels)?;
+    decoder.stream(|chunk| analyzer.feed(chunk))?;
+    let analysis = analyzer.finish()?;
+    let frames = analysis.frames;
+    let input_loudness = analysis.loudness;
+
     let target_lufs = settings.target_for(info.channels);
-    let silent_input =
-        !input_loudness.integrated_lufs.is_finite() || input_loudness.integrated_lufs <= -70.0;
-    let (gain_db, gain_clamped) = if silent_input {
-        (0.0, false)
-    } else {
-        let wanted = target_lufs - input_loudness.integrated_lufs;
-        let clamped = wanted.clamp(-settings.max_cut_db, settings.max_boost_db);
-        (clamped, clamped != wanted)
-    };
-    let gain = 10f64.powf(gain_db / 20.0);
+    let curve = plan::plan(&analysis, settings, target_lufs);
+    let mut sampler = curve.sampler();
 
     let bit_depth = settings
         .bit_depth
@@ -218,10 +217,14 @@ pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<Le
     let mut limiter = render::Limiter::new(info.sample_rate, info.channels, settings.ceiling());
 
     let decoder = decode::Decoder::open(input)?;
+    let channels = usize::from(info.channels);
     let mut gained: Vec<f32> = Vec::new();
     decoder.stream(|chunk| {
         gained.clear();
-        gained.extend(chunk.iter().map(|s| (f64::from(*s) * gain) as f32));
+        for frame in chunk.chunks_exact(channels) {
+            let gain = sampler.next_gain();
+            gained.extend(frame.iter().map(|s| (f64::from(*s) * gain) as f32));
+        }
         limiter.process(&gained, |limited| {
             out_meter.feed(limited)?;
             writer.write_frames(limited)
@@ -243,9 +246,11 @@ pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<Le
         },
         output_name,
         output_loudness: out_meter.finish()?,
-        gain_db,
-        gain_clamped,
-        silent_input,
+        gain_db: curve.median_db,
+        gain_min_db: curve.min_db,
+        gain_max_db: curve.max_db,
+        gain_clamped: curve.clamped,
+        silent_input: curve.all_pause,
         target_lufs,
     })
 }
