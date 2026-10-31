@@ -7,7 +7,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CODEC_TYPE_NULL, Decoder as SymphoniaDecoder, DecoderOptions};
+use symphonia::core::codecs::{
+    CODEC_TYPE_NULL, CODEC_TYPE_PCM_F32BE, CODEC_TYPE_PCM_F32LE, CODEC_TYPE_PCM_F64BE,
+    CODEC_TYPE_PCM_F64LE, Decoder as SymphoniaDecoder, DecoderOptions,
+};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
@@ -152,13 +155,28 @@ impl Decoder {
         let params = track.codec_params.clone();
 
         let total_frames = params.n_frames;
-        let source_depth = match (params.sample_format, params.bits_per_sample) {
-            (Some(SampleFormat::F32 | SampleFormat::F64), _) => Some(BitDepth::Float32),
-            (_, Some(16)) => Some(BitDepth::Int16),
-            (_, Some(24)) => Some(BitDepth::Int24),
-            (_, Some(32)) => Some(BitDepth::Float32),
-            (_, Some(8)) => Some(BitDepth::Int16),
-            _ => None,
+        // Float sources are named three ways, by demuxer: a float sample
+        // format, a float PCM codec (WAV/AIFF say only this), or 32 bits.
+        let float_codec = matches!(
+            params.codec,
+            CODEC_TYPE_PCM_F32LE
+                | CODEC_TYPE_PCM_F32BE
+                | CODEC_TYPE_PCM_F64LE
+                | CODEC_TYPE_PCM_F64BE
+        );
+        let float_format = matches!(
+            params.sample_format,
+            Some(SampleFormat::F32 | SampleFormat::F64)
+        );
+        let source_depth = if float_codec || float_format {
+            Some(BitDepth::Float32)
+        } else {
+            match params.bits_per_sample {
+                Some(16) | Some(8) => Some(BitDepth::Int16),
+                Some(24) => Some(BitDepth::Int24),
+                Some(32) => Some(BitDepth::Float32),
+                _ => None,
+            }
         };
 
         let mut decoder = symphonia::default::get_codecs()
@@ -232,6 +250,7 @@ impl Decoder {
     /// frames; returns the number of frames decoded.
     pub fn stream(mut self, mut sink: impl FnMut(&[f32]) -> Result<()>) -> Result<u64> {
         let mut buffer: Option<SampleBuffer<f32>> = None;
+        let mut scratch: Vec<f32> = Vec::new();
         let mut frames: u64 = 0;
         loop {
             let packet = match self.format.next_packet() {
@@ -251,7 +270,14 @@ impl Decoder {
                 SampleBuffer::new(decoded.capacity() as u64, *decoded.spec())
             });
             buffer.copy_interleaved_ref(decoded);
-            let samples = buffer.samples();
+            let mut samples = buffer.samples();
+            // A NaN or infinity (broken float WAVs have them) would poison
+            // the loudness filters and pass into the output; silence it.
+            if samples.iter().any(|s| !s.is_finite()) {
+                scratch.clear();
+                scratch.extend(samples.iter().map(|s| if s.is_finite() { *s } else { 0.0 }));
+                samples = &scratch;
+            }
             frames += (samples.len() / usize::from(self.info.channels)) as u64;
             sink(samples)?;
         }

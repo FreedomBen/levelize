@@ -114,7 +114,11 @@ a −3 dBTP ceiling lands typical speech comfortably within those bounds.
   pipes, which the spec allows). With `-o -`, `--json` stats move to stderr.
 - MP3 output shells out to `lame`; if it isn't in `PATH`, fail early with a clear error.
   `lame` is fed 32-bit float WAV over a pipe, which caps one MP3 render at WAV's 4 GB
-  limit — about 3 hours of stereo at 48 kHz (twice that mono).
+  limit — about 3 hours of stereo at 48 kHz (twice that mono). The cap is checked after
+  pass 1, before any rendering, with an error that says what to do instead.
+- Non-finite samples (NaN, ±inf — broken float WAVs have them) are replaced with silence
+  at the decode boundary: untreated, one NaN poisons the loudness filters for the rest of
+  the file and would pass into the output.
 - Progress bar on a TTY (by decoded duration); suppressed when piped or `--quiet`.
 - Logs and progress go to stderr; stdout carries only `--analyze` reports, `--json` output,
   or audio with `-o -`.
@@ -304,11 +308,14 @@ if ever needed, goes across files, not within one.
 
 ## Performance targets
 
-| Metric       | Target                                               |
-| ------------ | ---------------------------------------------------- |
-| Throughput   | ≥ 50× real-time (1 h stereo 44.1 kHz in ≤ ~72 s) on a typical laptop |
-| Memory       | < 200 MB RSS regardless of input length              |
-| Startup      | < 50 ms to first byte of work                        |
+| Metric       | Target                                               | Measured (M6)        |
+| ------------ | ---------------------------------------------------- | -------------------- |
+| Throughput   | ≥ 50× real-time (1 h stereo 44.1 kHz in ≤ ~72 s) on a typical laptop | 109× (33 s for 1 h)  |
+| Memory       | < 200 MB RSS regardless of input length              | 6.8 MB max RSS       |
+| Startup      | < 50 ms to first byte of work                        | < 10 ms              |
+
+Measured on the M6 hardening pass: release build, single thread, 1 h stereo 44.1 kHz WAV
+in and out, Ryzen 9 5950X, Fedora 43 (`/usr/bin/time -v`).
 
 Decoding twice instead of caching PCM is the deliberate trade: a 3-hour stereo file is
 ~4 GB as f32, while re-decoding costs seconds and keeps memory flat.
@@ -325,8 +332,14 @@ Decoding twice instead of caching PCM is the deliberate trade: a 3-hour stereo f
   - pause segments gain-held: noise floor rises no more than the adjacent program gain
   - idempotency: second run changes integrated loudness ≤ 0.5 LU
   - determinism: identical bytes across repeated runs
-- **Golden end-to-end:** one short CC-licensed real recording, asserted against stored
-  *stats* (not waveforms) so algorithm tuning doesn't churn snapshots.
+- **Golden end-to-end:** a deterministic speech-shaped fixture (seeded noise through a
+  syllable envelope: quiet guest, loud host, room-tone pauses — synthesized in-test, so the
+  repo stays free of binary blobs and the test hermetic), leveled with default settings and
+  asserted against stored *stats* (not waveforms, and with ±0.1 dB slack for libm
+  differences) so only an algorithm change can move them.
+- **Edge cases:** empty and sub-hop inputs copy through cleanly; truncated files level
+  what's there; NaN/±inf samples are silenced, never propagated; >2 channels and non-audio
+  files fail cleanly without stopping a batch; 8 kHz and 192 kHz still land on target.
 - **Output formats:** FLAC output decodes back bit-identical to the equivalent WAV; MP3 and
   stdin/stdout paths covered by round-trip integration tests (CI installs `lame`).
 - CI: `cargo test` + clippy + fmt on a Linux/macOS/Windows matrix.
@@ -360,7 +373,7 @@ publish to crates.io without issue.
       auto-targets, multi-file inputs, FLAC output, MP3 output via `lame`, tag copying
 - [x] **M5 — UX:** progress, `--json`, warnings, exit codes, `--profile` presets,
       stdin/stdout mode, polished `--help`, README
-- [ ] **M6 — Hardening:** golden tests, edge cases (silence, unreachable target,
+- [x] **M6 — Hardening:** golden tests, edge cases (silence, unreachable target,
       pathological inputs), performance pass against targets
 - [ ] **M7 — Release:** binaries, `cargo install`, man page, v0.1 announcement notes
 

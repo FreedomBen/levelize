@@ -443,6 +443,16 @@ impl Mp3Writer {
         bitrate_kbps: u32,
         tags: &Tags,
     ) -> Result<Self> {
+        // The float-WAV pipe into lame carries RIFF's 4 GB cap; say so up
+        // front instead of failing mid-render with a WAV-shaped error.
+        let pipe_bytes = total_frames
+            .checked_mul(u64::from(channels) * 4)
+            .and_then(|data| data.checked_add(50)); // float-WAV header overhead
+        ensure!(
+            pipe_bytes.is_some_and(|bytes| bytes <= u64::from(u32::MAX)),
+            "input too long for MP3 output: the WAV stream feeding lame would pass 4 GB \
+             (about 3 hours of stereo at 48 kHz); write WAV or FLAC instead"
+        );
         let mut command = Command::new("lame");
         command
             .arg("--silent")
@@ -723,5 +733,37 @@ mod tests {
         assert_eq!(leading_year("2026-05-01"), "2026");
         assert_eq!(leading_year("2026"), "2026");
         assert_eq!(leading_year("May 2026"), "");
+    }
+
+    #[test]
+    fn mp3_overflow_is_rejected_before_spawning_lame() {
+        // Stereo float frames past the RIFF cap: 4 GB / 8 bytes per frame.
+        let frames = (u64::from(u32::MAX) - 50) / 8 + 1;
+        let error = Mp3Writer::new(
+            Box::new(Vec::new()),
+            48_000,
+            2,
+            frames,
+            128,
+            &Tags::default(),
+        )
+        .err()
+        .map(|error| error.to_string())
+        .expect("an over-long input must be rejected");
+        assert!(error.contains("MP3 output"), "{error}");
+        assert!(error.contains("WAV or FLAC"), "{error}");
+
+        // u64 arithmetic on absurd counts must not wrap past the check.
+        assert!(
+            Mp3Writer::new(
+                Box::new(Vec::new()),
+                48_000,
+                2,
+                u64::MAX,
+                128,
+                &Tags::default()
+            )
+            .is_err()
+        );
     }
 }

@@ -232,7 +232,7 @@ fn level_all(cli: &Cli, settings: &Settings) -> Result<()> {
             }
             Err(error) => {
                 failures += 1;
-                eprintln!("levelize: {}: {error:#}", input.display());
+                eprintln!("levelize: {}", prefixed_error(input, &error));
             }
         }
     }
@@ -240,6 +240,18 @@ fn level_all(cli: &Cli, settings: &Settings) -> Result<()> {
         bail!("{failures} of {} input(s) failed", cli.inputs.len());
     }
     Ok(())
+}
+
+/// `{input}: {error}` — unless the error already leads with the path, as
+/// decode errors do; `a.wav: a.wav: …` helps nobody.
+fn prefixed_error(input: &Path, error: &anyhow::Error) -> String {
+    let text = format!("{error:#}");
+    let path = input.display().to_string();
+    if text.starts_with(&path) {
+        text
+    } else {
+        format!("{path}: {text}")
+    }
 }
 
 fn level_one(cli: &Cli, settings: &Settings, input: &Path) -> Result<LevelReport> {
@@ -365,7 +377,7 @@ fn analyze_all(cli: &Cli) -> Result<()> {
             }
             Err(error) => {
                 failures += 1;
-                eprintln!("levelize: {}: {error:#}", input.display());
+                eprintln!("levelize: {}", prefixed_error(input, &error));
             }
         }
     }
@@ -416,6 +428,21 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn error_prefix_is_not_doubled() {
+        let input = Path::new("ep.wav");
+        let named = anyhow::anyhow!("ep.wav: 4 channels; levelize handles mono and stereo only");
+        assert_eq!(
+            prefixed_error(input, &named),
+            "ep.wav: 4 channels; levelize handles mono and stereo only"
+        );
+        let anonymous = anyhow::anyhow!("writing WAV data");
+        assert_eq!(
+            prefixed_error(input, &anonymous),
+            "ep.wav: writing WAV data"
+        );
     }
 
     #[test]

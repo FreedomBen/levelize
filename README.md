@@ -32,8 +32,9 @@ episode.wav → episode.leveled.wav
 - **True-peak safe.** A 4×-oversampled lookahead limiter guarantees the ceiling
   (−1.5 dBTP by default) against intersample peaks.
 - **Formats.** Reads WAV, AIFF, FLAC, MP3, AAC/M4A, and Ogg Vorbis; writes WAV,
-  FLAC, and MP3 (via the `lame` binary). Basic tags (title, artist, album, date,
-  genre, comment, track) are copied over.
+  FLAC, and MP3 (via the `lame` binary; one MP3 render caps at about 3 hours of
+  stereo). Basic tags (title, artist, album, date, genre, comment, track) are
+  copied over.
 - **Scriptable.** `--json` stats (one object per input), stdin/stdout filter
   mode, meaningful exit codes, and byte-deterministic output: the same input and
   settings produce the same file every time.
@@ -106,10 +107,12 @@ cargo clippy --all-targets -- -D warnings  # lints
 cargo test                             # unit + acceptance tests
 ```
 
-The test suite includes an EBU Tech 3341/3342 compliance subset for the meter
-and end-to-end acceptance tests for the leveling invariants (target accuracy,
-ceiling safety, idempotency, determinism). MP3 and `flac -t` verification tests
-skip themselves when `lame` or `flac` aren't installed.
+The test suite includes an EBU Tech 3341/3342 compliance subset for the meter,
+end-to-end acceptance tests for the leveling invariants (target accuracy,
+ceiling safety, idempotency, determinism), golden stats pinned against a
+deterministic speech-shaped fixture, and pathological-input coverage (empty,
+truncated, NaN-carrying, and non-audio files). MP3 and `flac -t` verification
+tests skip themselves when `lame` or `flac` aren't installed.
 
 ## License
 

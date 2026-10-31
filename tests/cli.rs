@@ -163,6 +163,26 @@ fn usage_errors_exit_with_code_two() {
 }
 
 #[test]
+fn a_failing_input_does_not_stop_the_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let garbage = dir.path().join("garbage.wav");
+    std::fs::write(&garbage, b"not audio").unwrap();
+    let good = dir.path().join("good.wav");
+    quiet_wav(&good);
+
+    let output = bin().arg(&garbage).arg(&good).output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(dir.path().join("good.leveled.wav").exists());
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("1 of 2 input(s) failed"), "{stderr}");
+    // The input path leads the error line exactly once, not doubled.
+    let line = stderr.lines().find(|l| l.contains("garbage.wav")).unwrap();
+    let path = garbage.display().to_string();
+    assert_eq!(line.matches(&path).count(), 1, "{line}");
+}
+
+#[test]
 fn analyze_reads_stdin() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.wav");

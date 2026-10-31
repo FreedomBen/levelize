@@ -7,7 +7,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process::Command;
 
-use common::{sine, write_wav_pcm16};
+use common::{sine, write_wav_float32, write_wav_pcm16};
 use levelize::decode::{Decoder, Tags};
 use levelize::encode::{WavSpec, WavWriter};
 use levelize::{BitDepth, Format, Output, Settings};
@@ -194,6 +194,24 @@ fn aiff_input_decodes_and_levels() {
         "{}",
         out.loudness.integrated_lufs
     );
+}
+
+#[test]
+fn float_wav_input_stays_float_by_default() {
+    // The WAV demuxer names float sources only by codec id; "match the
+    // input's bit depth" must not quietly quantize them to 16-bit.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.wav");
+    let output = dir.path().join("out.wav");
+    write_wav_float32(&input, 48_000, 2, &sine(48_000, 2, 997.0, -30.0, 4.0));
+
+    levelize::level(&input, Output::File(&output), &settings(Format::Wav)).unwrap();
+    let bytes = std::fs::read(&output).unwrap();
+    assert_eq!(&bytes[12..16], b"fmt ");
+    let format_tag = u16::from_le_bytes(bytes[20..22].try_into().unwrap());
+    let bits = u16::from_le_bytes(bytes[34..36].try_into().unwrap());
+    assert_eq!(format_tag, 3, "IEEE float, not PCM");
+    assert_eq!(bits, 32);
 }
 
 #[test]

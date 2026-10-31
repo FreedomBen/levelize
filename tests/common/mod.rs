@@ -29,6 +29,35 @@ pub fn write_wav_pcm16(path: &Path, rate: u32, channels: u16, samples: &[f32]) {
     std::fs::write(path, bytes).unwrap();
 }
 
+/// Minimal 32-bit float WAV writer for fixtures; samples go out verbatim, so
+/// non-finite values survive into the file.
+pub fn write_wav_float32(path: &Path, rate: u32, channels: u16, samples: &[f32]) {
+    let data_len = (samples.len() * 4) as u32;
+    let frames = (samples.len() / usize::from(channels)) as u32;
+    let mut bytes = Vec::with_capacity(58 + samples.len() * 4);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(50 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&18u32.to_le_bytes());
+    bytes.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * u32::from(channels) * 4).to_le_bytes());
+    bytes.extend_from_slice(&(channels * 4).to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // cbSize
+    bytes.extend_from_slice(b"fact");
+    bytes.extend_from_slice(&4u32.to_le_bytes());
+    bytes.extend_from_slice(&frames.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
 /// Interleaved sine, the same signal on every channel.
 pub fn sine(rate: u32, channels: u16, freq: f64, amplitude_dbfs: f64, seconds: f64) -> Vec<f32> {
     sine_with_phase(rate, channels, freq, amplitude_dbfs, seconds, 0.0)
