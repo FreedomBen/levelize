@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, ensure};
 use clap::ValueEnum;
 
 pub use stats::{AnalyzeReport, LevelReport};
@@ -172,15 +172,63 @@ pub enum Output<'a> {
     Stdout,
 }
 
+/// One pass-2 encoder, dispatched by output format. The FLAC writer is boxed
+/// for its block buffers' sake; the variants would differ wildly in size.
+enum Writer {
+    Wav(encode::WavWriter<Box<dyn Write + Send>>),
+    Flac(Box<encode::FlacWriter<Box<dyn Write + Send>>>),
+    Mp3(encode::Mp3Writer),
+}
+
+impl Writer {
+    fn write_frames(&mut self, interleaved: &[f32]) -> Result<()> {
+        match self {
+            Writer::Wav(writer) => writer.write_frames(interleaved),
+            Writer::Flac(writer) => writer.write_frames(interleaved),
+            Writer::Mp3(writer) => writer.write_frames(interleaved),
+        }
+    }
+
+    fn finish(self) -> Result<Option<encode::FlacStats>> {
+        match self {
+            Writer::Wav(writer) => writer.finish().map(|()| None),
+            Writer::Flac(writer) => writer.finish().map(Some),
+            Writer::Mp3(writer) => writer.finish().map(|()| None),
+        }
+    }
+}
+
+/// Output bit depth for the format: the explicit setting, else the source
+/// depth, else 16-bit — with float mapped into FLAC's integer range.
+fn resolve_bit_depth(settings: &Settings, source: Option<BitDepth>) -> Result<BitDepth> {
+    if settings.format == Format::Mp3 {
+        ensure!(
+            settings.bit_depth.is_none(),
+            "MP3 output has no bit depth; drop --bit-depth"
+        );
+        return Ok(BitDepth::Int16); // fed to the WAV pipe's spec only
+    }
+    let depth = settings.bit_depth.or(source).unwrap_or(BitDepth::Int16);
+    if settings.format == Format::Flac && depth == BitDepth::Float32 {
+        ensure!(
+            settings.bit_depth.is_none(),
+            "FLAC output supports bit depths 16 and 24"
+        );
+        return Ok(BitDepth::Int24); // nearest FLAC can hold a float source
+    }
+    Ok(depth)
+}
+
 /// Level one input: measure and plan the gain curve (pass 1), then
 /// re-decode, apply the curve, limit true peaks, and encode (pass 2).
 pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<LevelReport> {
-    if settings.format != Format::Wav {
-        bail!("only WAV output is implemented so far; FLAC and MP3 land with M4");
+    if settings.format == Format::Mp3 {
+        encode::check_lame()?;
     }
 
     let decoder = decode::Decoder::open(input)?;
     let info = *decoder.info();
+    let tags = decoder.tags().clone();
     let mut analyzer = plan::Analyzer::new(info.sample_rate, info.channels)?;
     decoder.stream(|chunk| analyzer.feed(chunk))?;
     let analysis = analyzer.finish()?;
@@ -191,11 +239,8 @@ pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<Le
     let curve = plan::plan(&analysis, settings, target_lufs);
     let mut sampler = curve.sampler();
 
-    let bit_depth = settings
-        .bit_depth
-        .or(info.source_depth)
-        .unwrap_or(BitDepth::Int16);
-    let (sink, output_name): (Box<dyn Write>, String) = match output {
+    let bit_depth = resolve_bit_depth(settings, info.source_depth)?;
+    let (sink, output_name): (Box<dyn Write + Send>, String) = match output {
         Output::File(path) => (
             Box::new(BufWriter::new(
                 File::create(path).with_context(|| format!("cannot create {}", path.display()))?,
@@ -204,15 +249,25 @@ pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<Le
         ),
         Output::Stdout => (Box::new(BufWriter::new(std::io::stdout())), "-".to_string()),
     };
-    let mut writer = encode::WavWriter::new(
-        sink,
-        encode::WavSpec {
-            sample_rate: info.sample_rate,
-            channels: info.channels,
-            bit_depth,
-        },
-        frames,
-    )?;
+    let spec = encode::WavSpec {
+        sample_rate: info.sample_rate,
+        channels: info.channels,
+        bit_depth,
+    };
+    let mut writer = match settings.format {
+        Format::Wav => Writer::Wav(encode::WavWriter::new(sink, spec, frames, &tags)?),
+        Format::Flac => Writer::Flac(Box::new(encode::FlacWriter::new(
+            sink, spec, frames, &tags,
+        )?)),
+        Format::Mp3 => Writer::Mp3(encode::Mp3Writer::new(
+            sink,
+            info.sample_rate,
+            info.channels,
+            frames,
+            settings.mp3_bitrate_for(info.channels),
+            &tags,
+        )?),
+    };
     let mut out_meter = meter::Meter::new(info.sample_rate, info.channels)?;
     let mut limiter = render::Limiter::new(info.sample_rate, info.channels, settings.ceiling());
 
@@ -234,7 +289,10 @@ pub fn level(input: &Path, output: Output<'_>, settings: &Settings) -> Result<Le
         out_meter.feed(limited)?;
         writer.write_frames(limited)
     })?;
-    writer.finish()?;
+    let flac_stats = writer.finish()?;
+    if let (Some(stats), Output::File(path)) = (flac_stats, output) {
+        encode::patch_flac_header(path, &stats)?;
+    }
 
     Ok(LevelReport {
         input: AnalyzeReport {

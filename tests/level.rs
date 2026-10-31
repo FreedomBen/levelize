@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 use std::path::Path;
 
 use common::{sine, sine_with_phase, write_wav_pcm16};
-use levelize::{Format, Output, Settings};
+use levelize::{Output, Settings};
 
 fn level_file(input: &Path, output: &Path, settings: &Settings) -> levelize::LevelReport {
     levelize::level(input, Output::File(output), settings).unwrap()
@@ -261,19 +261,4 @@ fn leveling_is_idempotent_within_tolerance() {
         "{}",
         out.loudness.integrated_lufs
     );
-}
-
-#[test]
-fn refuses_non_wav_formats_for_now() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("in.wav");
-    let output = dir.path().join("out.flac");
-    write_wav_pcm16(&input, 48_000, 2, &sine(48_000, 2, 997.0, -30.0, 1.0));
-
-    let settings = Settings {
-        format: Format::Flac,
-        ..Settings::default()
-    };
-    let error = levelize::level(&input, Output::File(&output), &settings).unwrap_err();
-    assert!(error.to_string().contains("M4"), "{error}");
 }

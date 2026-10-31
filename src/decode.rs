@@ -1,4 +1,5 @@
-//! Streaming decode of input audio via symphonia (WAV in M1; more formats in M4).
+//! Streaming decode of input audio via symphonia: WAV, AIFF, FLAC, MP3, AAC
+//! (and .m4a), and Ogg Vorbis — plus the basic text tags they carry.
 
 use std::fs::File;
 use std::io::ErrorKind;
@@ -8,13 +9,87 @@ use anyhow::{Context, Result, bail};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, Decoder as SymphoniaDecoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTagKey};
 use symphonia::core::probe::Hint;
 use symphonia::core::sample::SampleFormat;
+use symphonia::core::units::Time;
 
 use crate::BitDepth;
+
+/// Basic text tags copied from input to output (DESIGN.md "Metadata").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tags {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub date: Option<String>,
+    pub genre: Option<String>,
+    pub comment: Option<String>,
+    pub track: Option<String>,
+}
+
+impl Tags {
+    pub fn is_empty(&self) -> bool {
+        *self == Tags::default()
+    }
+}
+
+/// Decode packets until the first one yields audio, and report its signal
+/// spec; used when the container doesn't declare the rate or channels.
+fn peek_spec(
+    format: &mut dyn FormatReader,
+    decoder: &mut dyn SymphoniaDecoder,
+    track_id: u32,
+) -> Result<(u32, usize)> {
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(ref error)) if error.kind() == ErrorKind::UnexpectedEof => {
+                bail!("no decodable audio frames")
+            }
+            Err(error) => return Err(error).context("reading input"),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                let spec = decoded.spec();
+                return Ok((spec.rate, spec.channels.count()));
+            }
+            // A frame the decoder can't make sense of yet; keep looking.
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(error) => return Err(error).context("probing input"),
+        }
+    }
+}
+
+/// Fold one metadata revision into `tags`; earlier finds win.
+fn collect_tags(tags: &mut Tags, revision: &MetadataRevision) {
+    for tag in revision.tags() {
+        let Some(key) = tag.std_key else { continue };
+        let slot = match key {
+            StandardTagKey::TrackTitle => &mut tags.title,
+            StandardTagKey::Artist => &mut tags.artist,
+            StandardTagKey::Album => &mut tags.album,
+            StandardTagKey::Date => &mut tags.date,
+            StandardTagKey::Genre => &mut tags.genre,
+            StandardTagKey::Comment => &mut tags.comment,
+            StandardTagKey::TrackNumber => &mut tags.track,
+            _ => continue,
+        };
+        if slot.is_none() {
+            // RIFF INFO values come back NUL-terminated; strip padding.
+            let value = tag.value.to_string();
+            let value = value.trim_end_matches('\0').trim();
+            if !value.is_empty() {
+                *slot = Some(value.to_string());
+            }
+        }
+    }
+}
 
 /// Stream properties fixed at open time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +108,7 @@ pub struct Decoder {
     decoder: Box<dyn SymphoniaDecoder>,
     track_id: u32,
     info: InputInfo,
+    tags: Tags,
 }
 
 impl Decoder {
@@ -45,7 +121,7 @@ impl Decoder {
             hint.with_extension(ext);
         }
 
-        let probed = symphonia::default::get_probe()
+        let mut probed = symphonia::default::get_probe()
             .format(
                 &hint,
                 source,
@@ -53,7 +129,19 @@ impl Decoder {
                 &MetadataOptions::default(),
             )
             .with_context(|| format!("{}: unrecognized or unsupported format", path.display()))?;
-        let format = probed.format;
+
+        // Tags can sit outside the container (ID3v2 before an MP3) or inside
+        // it (Vorbis comments, RIFF INFO); gather both.
+        let mut tags = Tags::default();
+        if let Some(metadata) = probed.metadata.get()
+            && let Some(revision) = metadata.current()
+        {
+            collect_tags(&mut tags, revision);
+        }
+        let mut format = probed.format;
+        if let Some(revision) = format.metadata().current() {
+            collect_tags(&mut tags, revision);
+        }
 
         let track = format
             .tracks()
@@ -61,27 +149,10 @@ impl Decoder {
             .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
             .with_context(|| format!("{}: no decodable audio track", path.display()))?;
         let track_id = track.id;
+        let params = track.codec_params.clone();
 
-        let sample_rate = track
-            .codec_params
-            .sample_rate
-            .with_context(|| format!("{}: sample rate unknown", path.display()))?;
-        let channels = track
-            .codec_params
-            .channels
-            .map(|channels| channels.count())
-            .with_context(|| format!("{}: channel layout unknown", path.display()))?;
-        if channels == 0 || channels > 2 {
-            bail!(
-                "{}: {channels} channels; levelize handles mono and stereo only",
-                path.display()
-            );
-        }
-        let total_frames = track.codec_params.n_frames;
-        let source_depth = match (
-            track.codec_params.sample_format,
-            track.codec_params.bits_per_sample,
-        ) {
+        let total_frames = params.n_frames;
+        let source_depth = match (params.sample_format, params.bits_per_sample) {
             (Some(SampleFormat::F32 | SampleFormat::F64), _) => Some(BitDepth::Float32),
             (_, Some(16)) => Some(BitDepth::Int16),
             (_, Some(24)) => Some(BitDepth::Int24),
@@ -90,9 +161,49 @@ impl Decoder {
             _ => None,
         };
 
-        let decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&params, &DecoderOptions::default())
             .with_context(|| format!("{}: no decoder for this codec", path.display()))?;
+
+        // AAC (and friends) may not declare the sample rate or channels until
+        // the first frame decodes; peek one, then rewind.
+        let known_channels = params
+            .channels
+            .map(|channels| channels.count())
+            .or_else(|| {
+                params
+                    .channel_layout
+                    .map(|layout| layout.into_channels().count())
+            });
+        let (sample_rate, channels) = match (params.sample_rate, known_channels) {
+            (Some(rate), Some(channels)) => (rate, channels),
+            (rate, channels) => {
+                let (peeked_rate, peeked_channels) =
+                    peek_spec(format.as_mut(), decoder.as_mut(), track_id).with_context(|| {
+                        format!("{}: cannot determine the stream layout", path.display())
+                    })?;
+                format
+                    .seek(
+                        SeekMode::Accurate,
+                        SeekTo::Time {
+                            time: Time::new(0, 0.0),
+                            track_id: Some(track_id),
+                        },
+                    )
+                    .with_context(|| format!("{}: cannot rewind after probing", path.display()))?;
+                decoder.reset();
+                (
+                    rate.unwrap_or(peeked_rate),
+                    channels.unwrap_or(peeked_channels),
+                )
+            }
+        };
+        if channels == 0 || channels > 2 {
+            bail!(
+                "{}: {channels} channels; levelize handles mono and stereo only",
+                path.display()
+            );
+        }
 
         Ok(Decoder {
             format,
@@ -104,11 +215,17 @@ impl Decoder {
                 total_frames,
                 source_depth,
             },
+            tags,
         })
     }
 
     pub fn info(&self) -> &InputInfo {
         &self.info
+    }
+
+    /// Basic text tags found in the input.
+    pub fn tags(&self) -> &Tags {
+        &self.tags
     }
 
     /// Streams the whole input to `sink` as interleaved f32 chunks of whole

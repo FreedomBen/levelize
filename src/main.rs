@@ -93,7 +93,17 @@ fn validate_args(cli: &Cli) -> Result<Format, String> {
     if has_stdin && cli.output.is_none() && !cli.analyze {
         return Err("stdin input needs --output (or --analyze): there is no name to derive".into());
     }
-    effective_format(cli)
+    let format = effective_format(cli)?;
+    if format == Format::Mp3 && cli.bit_depth.is_some() {
+        return Err("--bit-depth does not apply to MP3 output".into());
+    }
+    if format == Format::Flac && cli.bit_depth == Some(BitDepth::Float32) {
+        return Err("FLAC output supports --bit-depth 16 or 24".into());
+    }
+    if format != Format::Mp3 && cli.mp3_bitrate.is_some() {
+        return Err("--mp3-bitrate requires MP3 output".into());
+    }
+    Ok(format)
 }
 
 /// Output format: the explicit flag, else the `-o` extension, else WAV.
@@ -315,6 +325,33 @@ mod tests {
     fn unknown_extension_needs_explicit_format() {
         let cli = parse(&["levelize", "-o", "out.aiff", "in.wav"]);
         assert!(validate_args(&cli).is_err());
+    }
+
+    #[test]
+    fn bit_depth_is_rejected_for_mp3_output() {
+        let cli = parse(&["levelize", "--bit-depth", "24", "-o", "out.mp3", "in.wav"]);
+        let error = validate_args(&cli).unwrap_err();
+        assert!(error.contains("MP3"), "{error}");
+    }
+
+    #[test]
+    fn float_bit_depth_is_rejected_for_flac_output() {
+        let cli = parse(&["levelize", "--bit-depth", "32f", "-o", "out.flac", "in.wav"]);
+        let error = validate_args(&cli).unwrap_err();
+        assert!(error.contains("16 or 24"), "{error}");
+
+        let cli = parse(&["levelize", "--bit-depth", "24", "-o", "out.flac", "in.wav"]);
+        assert_eq!(validate_args(&cli), Ok(Format::Flac));
+    }
+
+    #[test]
+    fn mp3_bitrate_needs_mp3_output() {
+        let cli = parse(&["levelize", "--mp3-bitrate", "96", "in.wav"]);
+        let error = validate_args(&cli).unwrap_err();
+        assert!(error.contains("--mp3-bitrate"), "{error}");
+
+        let cli = parse(&["levelize", "--mp3-bitrate", "96", "-o", "out.mp3", "in.wav"]);
+        assert_eq!(validate_args(&cli), Ok(Format::Mp3));
     }
 
     #[test]

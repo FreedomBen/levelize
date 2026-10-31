@@ -113,6 +113,8 @@ a −3 dBTP ceiling lands typical speech comfortably within those bounds.
   written up front and WAV/FLAC never need to seek (FLAC's STREAMINFO MD5 stays unset on
   pipes, which the spec allows). With `-o -`, `--json` stats move to stderr.
 - MP3 output shells out to `lame`; if it isn't in `PATH`, fail early with a clear error.
+  `lame` is fed 32-bit float WAV over a pipe, which caps one MP3 render at WAV's 4 GB
+  limit — about 3 hours of stereo at 48 kHz (twice that mono).
 - Progress bar on a TTY (by decoded duration); suppressed when piped or `--quiet`.
 - Logs and progress go to stderr; stdout carries only `--analyze` reports, `--json` output,
   or audio with `-o -`.
@@ -349,7 +351,7 @@ publish to crates.io without issue.
       acceptance invariants green (this is already a useful loudness normalizer)
 - [x] **M3 — Adaptive leveling:** classification, gain curve, smoothing, static trim —
       the Levelator core; tune with listening tests
-- [ ] **M4 — Formats & channels:** symphonia inputs (FLAC/MP3/AAC/Ogg/AIFF), mono/stereo
+- [x] **M4 — Formats & channels:** symphonia inputs (FLAC/MP3/AAC/Ogg/AIFF), mono/stereo
       auto-targets, multi-file inputs, FLAC output, MP3 output via `lame`, tag copying
 - [ ] **M5 — UX:** progress, `--json`, warnings, exit codes, `--profile` presets,
       stdin/stdout mode, polished `--help`, README
