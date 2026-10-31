@@ -1,0 +1,12 @@
+[package]
+name = "levelize"
+version = "0.1.0"
+edition = "2024"
+description = "Adaptive loudness leveling for spoken-word audio — a modern Levelator as a CLI"
+license = "AGPL-3.0-or-later"
+keywords = ["audio", "loudness", "podcast", "normalization", "ebu-r128"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }

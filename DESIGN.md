@@ -101,6 +101,8 @@ a −3 dBTP ceiling lands typical speech comfortably within those bounds.
 ### Behavior rules
 
 - Default output name is `episode.leveled.<ext>` next to the input, extension per `--format`.
+- An unrecognized `-o` extension with no `--format` is a usage error — levelize never writes
+  one format behind another format's file name.
 - Never overwrite an existing file without `--force`.
 - **Always** refuse `output == input`, even with `--force` — the render pass re-reads the
   input while writing the output.
@@ -319,7 +321,7 @@ publish to crates.io without issue.
 
 ## Milestones
 
-- [ ] **M0 — Scaffold:** git repo housekeeping, AGPLv3 LICENSE file + Cargo.toml metadata,
+- [x] **M0 — Scaffold:** git repo housekeeping, AGPLv3 LICENSE file + Cargo.toml metadata,
       cargo project (lib + bin), clap skeleton, `--version`, CI with fmt/clippy/test
 - [ ] **M1 — Meter:** WAV decode → `--analyze` reporting integrated/LRA/true peak;
       Tech 3341/3342 tests pass
