@@ -20,7 +20,8 @@ publishing to crates.io is a manual step at the end.
   - [ ] `git tag -a vX.Y.Z -m "levelize X.Y.Z"`
   - [ ] `git push origin main vX.Y.Z`
 - [ ] Watch the Release workflow: it builds Linux (musl x86_64/aarch64),
-      macOS (universal), and Windows archives, checksums them, and creates
+      macOS (universal), and Windows archives, packages the Linux binaries
+      as `.deb`/`.rpm` (amd64/arm64), checksums everything, and creates
       the GitHub release. (A `workflow_dispatch` run builds the same
       artifacts without creating a release, as a dry run.)
 - [ ] Publish to crates.io: `cargo publish` (needs `cargo login` once).

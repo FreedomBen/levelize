@@ -50,8 +50,16 @@ episode.wav → episode.leveled.wav
 Prebuilt binaries for Linux (static musl, x86_64/aarch64), macOS (universal),
 and Windows are on the
 [releases page](https://github.com/FreedomBen/levelize/releases); each archive
-carries the binary and the man page. With a Rust toolchain (edition 2024,
-rustc 1.85 or newer):
+carries the binary and the man page. The same static Linux binaries also come
+as `.deb` and `.rpm` packages (amd64/arm64), which install the binary, man
+page, and docs:
+
+```bash
+sudo apt install ./levelize_X.Y.Z-1_amd64.deb    # Debian/Ubuntu
+sudo dnf install ./levelize-X.Y.Z-1.x86_64.rpm   # Fedora/RHEL-family
+```
+
+With a Rust toolchain (edition 2024, rustc 1.85 or newer):
 
 ```bash
 cargo install levelize
@@ -64,6 +72,10 @@ git clone https://github.com/FreedomBen/levelize.git
 cd levelize
 sudo make install
 ```
+
+`make deb` and `make rpm` build the packages from a checkout, given
+[cargo-deb](https://crates.io/crates/cargo-deb) /
+[cargo-generate-rpm](https://crates.io/crates/cargo-generate-rpm).
 
 MP3 *output* additionally needs the `lame` encoder on `PATH` at run time, and
 M4B/M4A output needs `ffmpeg`; everything else is pure Rust with no system

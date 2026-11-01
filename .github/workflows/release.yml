@@ -94,9 +94,45 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # deb and rpm packages are assembled from the Linux build artifacts, so one
+  # x86_64 runner packages both architectures (neither tool runs the binary).
+  packages:
+    name: deb and rpm packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install packaging tools
+        run: cargo install --locked cargo-deb cargo-generate-rpm
+      - uses: actions/download-artifact@v4
+        with:
+          path: archives
+          pattern: "*-unknown-linux-musl"
+      - name: Build packages
+        shell: bash
+        run: |
+          mkdir -p dist
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            tar xzf archives/"${target}"/levelize-*-"${target}".tar.gz
+            src=(levelize-*-"${target}")
+            # Package the binary and man page exactly as shipped in the archive.
+            install -Dm755 "${src[0]}/levelize" "target/${target}/release/levelize"
+            install -Dm644 "${src[0]}/levelize.1" doc/levelize.1
+            rm -r "${src[0]}"
+            cargo deb --no-build --no-strip --target "${target}" --output dist/
+            cargo generate-rpm --target "${target}" --output dist/
+          done
+          ls -l dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: GitHub release
-    needs: build
+    needs: [build, packages]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -113,7 +149,8 @@ jobs:
           files: dist/*
           body: >
             Prebuilt binaries for Linux (static musl, x86_64 and aarch64),
-            macOS (universal), and Windows. Each archive carries the binary,
-            man page (not on Windows), README, LICENSE, and CHANGELOG.
-            Details in
+            macOS (universal), and Windows, plus .deb and .rpm packages of
+            the same static Linux binaries. Each archive carries the binary,
+            man page (not on Windows), README, LICENSE, and CHANGELOG; the
+            packages install the binary, man page, and docs. Details in
             [CHANGELOG.md](https://github.com/FreedomBen/levelize/blob/main/CHANGELOG.md).

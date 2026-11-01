@@ -5,7 +5,7 @@ BINDIR  = $(DESTDIR)$(PREFIX)/bin
 MANDIR  = $(DESTDIR)$(PREFIX)/share/man/man1
 CARGO  ?= cargo
 
-.PHONY: all build man test lint install uninstall clean help
+.PHONY: all build man test lint install uninstall deb rpm clean help
 
 all: build man ## Build the release binary and the man page
 
@@ -31,6 +31,12 @@ install: build man ## Install binary and man page under PREFIX (default /usr/loc
 
 uninstall: ## Remove the installed binary and man page
 	rm -f $(BINDIR)/levelize $(MANDIR)/levelize.1
+
+deb: build man ## Build a .deb into target/debian (needs cargo-deb)
+	$(CARGO) deb --no-build --no-strip
+
+rpm: build man ## Build an .rpm into target/generate-rpm (needs cargo-generate-rpm)
+	$(CARGO) generate-rpm
 
 clean: ## Remove build artifacts and the generated man page
 	$(CARGO) clean

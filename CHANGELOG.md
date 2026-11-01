@@ -4,6 +4,22 @@ Notable changes to levelize. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 semver, with the usual 0.x caveat that minor versions may break.
 
+## [Unreleased]
+
+### Added
+
+- `.deb` and `.rpm` packages — amd64/arm64, the same static binaries as the
+  Linux release archives — attached to GitHub releases. They install the
+  binary, man page, and docs, and recommend `ffmpeg` and `lame` for M4B/MP3
+  output. `make deb` / `make rpm` (via `cargo-deb` / `cargo-generate-rpm`)
+  build them locally.
+
+### Changed
+
+- The crate description ends in "a modern Levelator CLI" (was "…as a CLI"),
+  so the Debian package synopsis fits on one line; `--help`'s first line
+  follows suit.
+
 ## [0.0.2] — 2026-11-01
 
 ### Added

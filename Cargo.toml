@@ -4,7 +4,7 @@ version = "0.0.2"
 edition = "2024"
 default-run = "levelize"
 rust-version = "1.85"
-description = "Adaptive loudness leveling for spoken-word audio — a modern Levelator as a CLI"
+description = "Adaptive loudness leveling for spoken-word audio — a modern Levelator CLI"
 repository = "https://github.com/FreedomBen/levelize"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -30,3 +30,45 @@ tempfile = "3.27.0"
 [[bin]]
 name = "levelize-man"
 required-features = ["mangen"]
+
+# `cargo deb` (or `make deb`) builds a Debian package from this metadata.
+[package.metadata.deb]
+maintainer = "Benjamin Porter <FreedomBen@users.noreply.github.com>"
+copyright = "2026 Benjamin Porter"
+extended-description = """\
+levelize evens out levels between and within speakers — quiet voices up, \
+loud voices down, pauses and room tone left alone — then lands the result \
+exactly on a standard integrated-loudness target under a true-peak ceiling. \
+It reads WAV, AIFF, FLAC, MP3, AAC/M4A/M4B, and Ogg Vorbis, and writes WAV, \
+FLAC, MP3 (via lame), and M4B/M4A (via ffmpeg)."""
+section = "sound"
+priority = "optional"
+# The binary is statically linked (pure Rust, musl on release builds).
+depends = []
+recommends = "ffmpeg, lame"
+assets = [
+    ["target/release/levelize", "usr/bin/", "755"],
+    ["doc/levelize.1", "usr/share/man/man1/", "644"],
+    ["README.md", "usr/share/doc/levelize/", "644"],
+    ["CHANGELOG.md", "usr/share/doc/levelize/", "644"],
+]
+
+# `cargo generate-rpm` (or `make rpm`) builds an RPM package from this metadata.
+[package.metadata.generate-rpm]
+url = "https://github.com/FreedomBen/levelize"
+# The binary is statically linked; don't scan it for shared-library requires.
+auto-req = "disabled"
+# No scriptlets, so no /bin/sh requirement either.
+require-sh = false
+assets = [
+    { source = "target/release/levelize", dest = "/usr/bin/levelize", mode = "755" },
+    { source = "doc/levelize.1", dest = "/usr/share/man/man1/levelize.1", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/levelize/README.md", mode = "644", doc = true },
+    { source = "CHANGELOG.md", dest = "/usr/share/doc/levelize/CHANGELOG.md", mode = "644", doc = true },
+    # Not doc-flagged: license files must survive `tsflags=nodocs` installs.
+    { source = "LICENSE", dest = "/usr/share/licenses/levelize/LICENSE", mode = "644" },
+]
+
+[package.metadata.generate-rpm.recommends]
+ffmpeg = "*"
+lame = "*"

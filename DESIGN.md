@@ -373,7 +373,9 @@ Decoding twice instead of caching PCM is the deliberate trade: a 3-hour stereo f
 
 - `cargo install levelize`; prebuilt release binaries from CI on `v*` tags (Linux musl
   static x86_64/aarch64, macOS universal, Windows), checksummed and attached to the GitHub
-  release. The release checklist lives in RELEASING.md; crates.io publishing is manual.
+  release, plus `.deb`/`.rpm` packages of the static Linux binaries (`cargo deb` /
+  `cargo generate-rpm`, metadata in Cargo.toml; `make deb` / `make rpm` locally). The
+  release checklist lives in RELEASING.md; crates.io publishing is manual.
 - Man page generated from clap via `clap_mangen` behind the `mangen` feature (`make man`
   → `doc/levelize.1`, shipped in the release archives); `--help` is the primary doc
   surface. `make install` places binary and man page under `PREFIX` (default
