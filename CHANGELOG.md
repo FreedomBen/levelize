@@ -4,7 +4,7 @@ Notable changes to levelize. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 semver, with the usual 0.x caveat that minor versions may break.
 
-## [0.0.2] — unreleased
+## [0.0.2] — 2026-11-01
 
 ### Added
 
