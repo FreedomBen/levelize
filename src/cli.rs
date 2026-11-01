@@ -80,9 +80,14 @@ pub struct Cli {
 
     /// Chapter marks for M4B/M4A output: a text file with one chapter per
     /// line as `TIME Title`, where TIME is [H:]MM:SS[.sss] or plain seconds
-    /// (`#` comments and blank lines are skipped)
+    /// (`#` comments and blank lines are skipped); replaces any chapters
+    /// found in the input
     #[arg(long, value_name = "FILE", verbatim_doc_comment)]
     pub chapters: Option<PathBuf>,
+
+    /// Don't carry chapter marks from the input into M4B/M4A output
+    #[arg(long, conflicts_with = "chapters")]
+    pub no_chapters: bool,
 
     /// Analysis pass only: print loudness stats, write nothing
     #[arg(long, conflicts_with = "output")]

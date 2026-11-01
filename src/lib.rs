@@ -146,6 +146,9 @@ pub struct Settings {
     pub aac_bitrate_kbps: Option<u32>,
     /// Chapter marks for M4B/M4A output.
     pub chapters: Vec<encode::Chapter>,
+    /// When `chapters` is empty, carry chapter marks found in the input
+    /// into M4B/M4A output.
+    pub keep_chapters: bool,
 }
 
 impl Default for Settings {
@@ -162,6 +165,7 @@ impl Default for Settings {
             mp3_bitrate_kbps: None,
             aac_bitrate_kbps: None,
             chapters: Vec::new(),
+            keep_chapters: true,
         }
     }
 }
@@ -344,6 +348,41 @@ pub fn level_with_progress(
         (kbps.round() as u32).clamp(32, 320)
     });
 
+    // Chapter marks: explicit settings win; otherwise an M4B/M4A render
+    // carries over whatever the input itself declares. Chapter problems
+    // never fail a render — the marks are auxiliary — they surface as a
+    // report warning instead.
+    let mut chapter_warning = None;
+    let chapters: Vec<encode::Chapter> = if !settings.format.is_aac() {
+        Vec::new()
+    } else if !settings.chapters.is_empty() {
+        settings.chapters.clone()
+    } else if settings.keep_chapters {
+        match encode::read_input_chapters(input) {
+            Ok(found) => {
+                let duration_secs = frames as f64 / rate;
+                let total = found.len();
+                let kept: Vec<encode::Chapter> = found
+                    .into_iter()
+                    .filter(|chapter| chapter.start_secs < duration_secs)
+                    .collect();
+                if kept.len() < total {
+                    chapter_warning = Some(format!(
+                        "{} input chapter mark(s) past the end of the audio were dropped",
+                        total - kept.len()
+                    ));
+                }
+                kept
+            }
+            Err(error) => {
+                chapter_warning = Some(format!("input chapters not carried over: {error:#}"));
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     let target_lufs = settings.target_for(info.channels);
     let curve = plan::plan(&analysis, settings, target_lufs);
     let mut sampler = curve.sampler();
@@ -386,7 +425,7 @@ pub fn level_with_progress(
                 audiobook: settings.format == Format::M4b,
             },
             &tags,
-            &settings.chapters,
+            &chapters,
         )?),
     };
     let mut out_meter = meter::Meter::new(info.sample_rate, info.channels)?;
@@ -435,6 +474,8 @@ pub fn level_with_progress(
         gain_clamped: curve.clamped,
         silent_input: curve.all_pause,
         target_lufs,
+        chapters_written: chapters.len(),
+        chapter_warning,
     })
 }
 

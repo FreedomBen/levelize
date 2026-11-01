@@ -26,8 +26,9 @@ on today's loudness standards as a single fast CLI.
   stereo), and M4B/M4A (AAC via `ffmpeg`; no length cap), with basic tags
   copied over.
 - Audiobook output: `.m4b` carries the iTunes audiobook marker so players
-  resume playback, and `--chapters` adds chapter marks from a plain
-  `TIME Title` text file.
+  resume playback. Chapter marks found in the input (MP4 chapters and ID3
+  CHAP alike) carry over automatically; `--chapters` replaces them from a
+  plain `TIME Title` text file, `--no-chapters` strips them.
 - Lossy outputs default to the input's own measured bitrate when the input
   is itself lossy (`--mp3-bitrate`/`--aac-bitrate` override; lossless inputs
   get 128/96 kbps MP3 and 96/64 kbps AAC for stereo/mono).

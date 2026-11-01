@@ -48,7 +48,7 @@ pipeline, distributed as a single static binary.
 - Noise reduction, de-essing, EQ, or other repair.
 - More than 2 channels (clear error message).
 - Metadata beyond basic text tags and M4B/M4A chapter marks — no artwork or full ID3
-  fidelity, and no reading of chapters out of input files.
+  fidelity.
 
 ## CLI
 
@@ -83,7 +83,8 @@ ffmpeg -i raw.mov -f wav - | levelize - -o episode.wav   # stdin works too
 | `--bit-depth <depth>`           | match input               | `16` \| `24` \| `32f` for WAV; `16` \| `24` for FLAC            |
 | `--mp3-bitrate <kbps>`          | input's, else 128 st / 96 mono | CBR bitrate for MP3 output (a lossy input's measured bitrate wins, snapped to MP3's CBR steps) |
 | `--aac-bitrate <kbps>`          | input's, else 96 st / 64 mono  | Bitrate for M4B/M4A output (a lossy input's measured bitrate wins)                             |
-| `--chapters <file>`             | none                      | Chapter marks for M4B/M4A: one `TIME Title` line each, `[H:]MM:SS[.sss]` or plain seconds      |
+| `--chapters <file>`             | input's chapters          | Chapter marks for M4B/M4A: one `TIME Title` line each, `[H:]MM:SS[.sss]` or plain seconds      |
+| `--no-chapters`                 | off                       | Don't carry chapter marks from the input into M4B/M4A output                                   |
 | `--analyze`                     | off                       | Analysis pass only: print loudness stats, write nothing         |
 | `--json`                        | off                       | Emit stats as JSON on stdout                                    |
 | `--force`                       | off                       | Allow overwriting an existing output file                       |
@@ -126,7 +127,13 @@ a −3 dBTP ceiling lands typical speech comfortably within those bounds.
   copied to the real destination, so `-o -` still works. The muxer runs with `faststart`
   (index up front) and `bitexact` (deterministic output). A `.m4b` additionally gets the
   iTunes audiobook atom (`stik` = 2) so players remember the position; `--chapters` marks
-  are passed through as an ffmetadata file. A lossy *input*'s measured bitrate (packet
+  are passed through as an ffmetadata file. Chapters already in the input carry over by
+  default — read back through ffmpeg's own ffmetadata dump, which normalizes every flavor
+  (MP4 `chpl` atoms, QuickTime chapter tracks, ID3v2 CHAP frames in MP3s) — with explicit
+  `--chapters` replacing them and `--no-chapters` dropping them. Chapter problems never
+  fail a render: unreadable chapter metadata or marks past a truncated input's real end
+  are reported as a warning and the affected marks are left out. A lossy *input*'s
+  measured bitrate (packet
   bytes over duration, so tags and cover art don't inflate it) becomes the default output
   bitrate for both MP3 and AAC; lossless inputs fall back to the static defaults.
 - Non-finite samples (NaN, ±inf — broken float WAVs have them) are replaced with silence
@@ -157,7 +164,7 @@ are `null` where the measurement is −∞ (digital silence). `--analyze --json`
                 "channels": 2, "integrated_lufs": -23.4, "lra_lu": 11.2,
                 "true_peak_dbtp": -3.1 },
   "output":   { "path": "ep12.leveled.wav", "integrated_lufs": -16.0, "lra_lu": 4.8,
-                "true_peak_dbtp": -1.6 },
+                "true_peak_dbtp": -1.6, "chapters": 0 },
   "gain":     { "median_db": 7.2, "min_db": -1.9, "max_db": 11.0 },
   "settings": { "profile": "podcast", "target_lufs": -16.0, "ceiling_dbtp": -1.5,
                 "leveling": "normal", "format": "wav" },
@@ -262,9 +269,10 @@ Basic text tags are copied from input to output: title, artist, album/show, date
 comment, and track number. They are read through symphonia's metadata API (ID3v2, Vorbis
 comment, RIFF INFO) and written in the output's native form — RIFF INFO for WAV, Vorbis
 comments for FLAC, ID3 via `lame`'s tag arguments for MP3, iTunes atoms via `ffmpeg`'s
-metadata arguments for M4B/M4A. Chapter marks can be *added* to M4B/M4A from a text file
-(`--chapters`), but artwork, chapters already in an input, and nonstandard tags are not
-carried over in v1.
+metadata arguments for M4B/M4A. Chapter marks flow into M4B/M4A output from the input
+(any flavor ffmpeg can read) or from a `--chapters` text file, which takes precedence;
+artwork and nonstandard tags are not carried over in v1, and no other output format can
+hold chapters.
 
 ## Technology
 

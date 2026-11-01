@@ -266,6 +266,7 @@ fn m4b_output_lands_near_target_with_tags_and_chapters() {
     };
     let report = levelize::level(&input, Output::File(&output), &settings).unwrap();
     assert!(report.gain_db > 0.0);
+    assert_eq!(report.chapters_written, 2);
 
     // Lossy coding and codec delay nudge the numbers; stay within 1 LU.
     let out = levelize::analyze(&output).unwrap();
@@ -401,6 +402,78 @@ fn m4b_streams_to_stdout_with_chapters() {
     );
     assert!(contains(&bytes, b"chpl"));
     assert!(contains(&bytes, b"Outro"));
+}
+
+#[test]
+fn input_chapters_carry_over_unless_overridden_or_stripped() {
+    if !have_ffmpeg() {
+        eprintln!("skipping: `ffmpeg` is not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("in.wav");
+    write_wav_pcm16(&wav, 44_100, 1, &sine(44_100, 1, 997.0, -30.0, 6.0));
+
+    // A chaptered source audiobook.
+    let source = dir.path().join("src.m4b");
+    let chaptered = Settings {
+        format: Format::M4b,
+        chapters: vec![
+            Chapter {
+                start_secs: 0.0,
+                title: "Opening".into(),
+            },
+            Chapter {
+                start_secs: 3.0,
+                title: "Closing".into(),
+            },
+        ],
+        ..Settings::default()
+    };
+    levelize::level(&wav, Output::File(&source), &chaptered).unwrap();
+
+    // Re-leveling it carries the marks over by default...
+    let kept = dir.path().join("kept.m4b");
+    let report = levelize::level(&source, Output::File(&kept), &settings(Format::M4b)).unwrap();
+    assert_eq!(report.chapters_written, 2, "{:?}", report.chapter_warning);
+    let bytes = std::fs::read(&kept).unwrap();
+    assert!(contains(&bytes, b"chpl"));
+    assert!(contains(&bytes, b"Opening"));
+    assert!(contains(&bytes, b"Closing"));
+
+    // ...explicit chapters replace them (M4A takes the same path)...
+    let replaced = dir.path().join("replaced.m4a");
+    let fresh = Settings {
+        format: Format::M4a,
+        chapters: vec![Chapter {
+            start_secs: 0.0,
+            title: "Fresh".into(),
+        }],
+        ..Settings::default()
+    };
+    let report = levelize::level(&source, Output::File(&replaced), &fresh).unwrap();
+    assert_eq!(report.chapters_written, 1);
+    let bytes = std::fs::read(&replaced).unwrap();
+    assert!(contains(&bytes, b"Fresh"));
+    assert!(!contains(&bytes, b"Opening"));
+
+    // ...keep_chapters = false (--no-chapters) strips them...
+    let stripped = dir.path().join("stripped.m4b");
+    let none = Settings {
+        format: Format::M4b,
+        keep_chapters: false,
+        ..Settings::default()
+    };
+    let report = levelize::level(&source, Output::File(&stripped), &none).unwrap();
+    assert_eq!(report.chapters_written, 0);
+    let bytes = std::fs::read(&stripped).unwrap();
+    assert!(!contains(&bytes, b"chpl"));
+    assert!(!contains(&bytes, b"Opening"));
+
+    // ...and a chaptered input still levels to chapterless formats cleanly.
+    let plain = dir.path().join("out.wav");
+    let report = levelize::level(&source, Output::File(&plain), &settings(Format::Wav)).unwrap();
+    assert_eq!(report.chapters_written, 0);
 }
 
 /// Minimal big-endian PCM16 AIFF: FORM/AIFF with COMM and SSND chunks.

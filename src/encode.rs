@@ -653,6 +653,138 @@ fn ffmetadata_chapters(chapters: &[Chapter], duration_secs: f64) -> String {
     meta
 }
 
+/// Chapters already in an input file, read through ffmpeg's ffmetadata dump —
+/// which normalizes every storage flavor (MP4 `chpl` atoms, QuickTime chapter
+/// tracks, ID3v2 CHAP frames) into the one format this module already writes.
+/// Reads only headers, so it returns in milliseconds.
+pub fn read_input_chapters(path: &Path) -> Result<Vec<Chapter>> {
+    let output = match Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args(["-f", "ffmetadata", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            bail!("M4B/M4A output needs `ffmpeg` on PATH")
+        }
+        Err(error) => return Err(error).context("running ffmpeg"),
+    };
+    ensure!(
+        output.status.success(),
+        "ffmpeg could not read the input's metadata ({})",
+        output.status
+    );
+    Ok(parse_ffmetadata_chapters(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+/// Pull the `[CHAPTER]` sections out of ffmetadata text. Lenient by design,
+/// since this reads other tools' files: a chapter without a start is
+/// skipped, one whose start doesn't increase is skipped, a missing TIMEBASE
+/// means nanoseconds (the format's default), and a missing title becomes
+/// "Chapter N".
+fn parse_ffmetadata_chapters(text: &str) -> Vec<Chapter> {
+    struct Raw {
+        timebase: f64,
+        start: Option<f64>,
+        title: Option<String>,
+    }
+    let mut raws: Vec<Raw> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with(';') || line.starts_with('#') {
+            continue; // comments, the ;FFMETADATA1 header among them
+        }
+        if line.starts_with('[') {
+            if line == "[CHAPTER]" {
+                raws.push(Raw {
+                    timebase: 1e-9,
+                    start: None,
+                    title: None,
+                });
+                continue;
+            }
+            if !raws.is_empty() {
+                break; // a later section ([STREAM]) ends the chapter list
+            }
+            continue;
+        }
+        // Keys before the first [CHAPTER] are global tags; not ours.
+        let Some(current) = raws.last_mut() else {
+            continue;
+        };
+        let Some((key, value)) = split_unescaped_eq(line) else {
+            continue;
+        };
+        match key {
+            "TIMEBASE" => {
+                if let Some((num, den)) = value.split_once('/')
+                    && let (Ok(num), Ok(den)) = (num.parse::<f64>(), den.parse::<f64>())
+                    && den > 0.0
+                {
+                    current.timebase = num / den;
+                }
+            }
+            "START" => current.start = value.parse::<f64>().ok(),
+            "title" => current.title = Some(unescape(value)),
+            _ => {}
+        }
+    }
+    let mut chapters: Vec<Chapter> = Vec::new();
+    for (index, raw) in raws.into_iter().enumerate() {
+        let Some(start) = raw.start else { continue };
+        let start_secs = (start * raw.timebase).max(0.0);
+        if chapters
+            .last()
+            .is_some_and(|last| start_secs <= last.start_secs)
+        {
+            continue;
+        }
+        chapters.push(Chapter {
+            start_secs,
+            title: raw
+                .title
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| format!("Chapter {}", index + 1)),
+        });
+    }
+    chapters
+}
+
+/// Split `key=value` at the first unescaped `=`.
+fn split_unescaped_eq(line: &str) -> Option<(&str, &str)> {
+    let mut escaped = false;
+    for (pos, c) in line.char_indices() {
+        match c {
+            '\\' if !escaped => escaped = true,
+            '=' if !escaped => return Some((&line[..pos], &line[pos + 1..])),
+            _ => escaped = false,
+        }
+    }
+    None
+}
+
+/// Drop ffmetadata's `\` escapes (`\=`, `\;`, `\#`, `\\`).
+fn unescape(value: &str) -> String {
+    let mut plain = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                plain.push(next);
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    plain
+}
+
 /// The sample rates AAC (and ffmpeg's encoder) can represent.
 const AAC_SAMPLE_RATES: [u32; 13] = [
     7_350, 8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 64_000, 88_200,
@@ -1162,5 +1294,87 @@ mod tests {
             .map(|error| error.to_string())
             .expect("a chapter past the end must be rejected");
         assert!(error.contains("past the end"), "{error}");
+    }
+
+    #[test]
+    fn ffmetadata_chapters_parse_back() {
+        let text = ";FFMETADATA1\n\
+                    major_brand=M4A \n\
+                    title=The Book Itself\n\
+                    [CHAPTER]\n\
+                    TIMEBASE=1/1000\n\
+                    START=0\n\
+                    END=5000\n\
+                    title=Cold Open\n\
+                    [CHAPTER]\n\
+                    TIMEBASE=1/44100\n\
+                    START=220500\n\
+                    title=A \\= B\\; \\#1 \\\\\n\
+                    [STREAM]\n\
+                    title=not a chapter\n";
+        let chapters = parse_ffmetadata_chapters(text);
+        assert_eq!(
+            chapters,
+            [
+                Chapter {
+                    start_secs: 0.0,
+                    title: "Cold Open".into()
+                },
+                Chapter {
+                    start_secs: 5.0,
+                    title: "A = B; #1 \\".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ffmetadata_parsing_is_lenient() {
+        // No TIMEBASE means nanoseconds; no title gets a placeholder; a
+        // start that doesn't increase, or is missing, drops the chapter.
+        let text = ";FFMETADATA1\n\
+                    [CHAPTER]\n\
+                    START=2500000000\n\
+                    [CHAPTER]\n\
+                    TIMEBASE=1/1000\n\
+                    START=1000\n\
+                    title=Out of order\n\
+                    [CHAPTER]\n\
+                    TIMEBASE=1/1000\n\
+                    title=No start\n\
+                    [CHAPTER]\n\
+                    TIMEBASE=1/1000\n\
+                    START=9000\n\
+                    title=Fine\n";
+        let chapters = parse_ffmetadata_chapters(text);
+        assert_eq!(
+            chapters,
+            [
+                Chapter {
+                    start_secs: 2.5,
+                    title: "Chapter 1".into()
+                },
+                Chapter {
+                    start_secs: 9.0,
+                    title: "Fine".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ffmetadata_round_trips_through_the_parser() {
+        let chapters = vec![
+            Chapter {
+                start_secs: 0.0,
+                title: "A = B; #1 \\".into(),
+            },
+            Chapter {
+                start_secs: 2.5,
+                title: "Plain".into(),
+            },
+        ];
+        let parsed = parse_ffmetadata_chapters(&ffmetadata_chapters(&chapters, 10.0));
+        assert_eq!(parsed, chapters);
     }
 }

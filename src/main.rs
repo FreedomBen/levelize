@@ -48,6 +48,9 @@ fn validate_args(cli: &Cli) -> Result<Format, String> {
             return Err("--chapters takes a single input; the marks name one recording".into());
         }
     }
+    if cli.no_chapters && (cli.analyze || !format.is_aac()) {
+        return Err("--no-chapters requires M4B or M4A output".into());
+    }
     Ok(format)
 }
 
@@ -93,6 +96,7 @@ fn build_settings(cli: &Cli, format: Format, chapters: Vec<Chapter>) -> Settings
         mp3_bitrate_kbps: cli.mp3_bitrate,
         aac_bitrate_kbps: cli.aac_bitrate,
         chapters,
+        keep_chapters: !cli.no_chapters,
     }
 }
 
@@ -549,6 +553,30 @@ mod tests {
             "in.wav",
         ]);
         assert_eq!(validate_args(&cli), Ok(Format::M4b));
+    }
+
+    #[test]
+    fn no_chapters_conflicts_with_chapters_and_needs_aac_output() {
+        assert!(
+            Cli::try_parse_from([
+                "levelize",
+                "--chapters",
+                "toc.txt",
+                "--no-chapters",
+                "-o",
+                "out.m4b",
+                "in.wav",
+            ])
+            .is_err()
+        );
+
+        let cli = parse(&["levelize", "--no-chapters", "in.wav"]);
+        let error = validate_args(&cli).unwrap_err();
+        assert!(error.contains("M4B or M4A"), "{error}");
+
+        let cli = parse(&["levelize", "--no-chapters", "-o", "out.m4a", "in.wav"]);
+        assert_eq!(validate_args(&cli), Ok(Format::M4a));
+        assert!(!build_settings(&cli, Format::M4a, Vec::new()).keep_chapters);
     }
 
     #[test]

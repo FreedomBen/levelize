@@ -96,6 +96,11 @@ pub struct LevelReport {
     /// No program material found; copied through with no gain.
     pub silent_input: bool,
     pub target_lufs: f64,
+    /// Chapter marks written to the output (M4B/M4A only).
+    pub chapters_written: usize,
+    /// A non-fatal chapter problem — unreadable input metadata, or marks past
+    /// the end of the audio; the render completed without the affected marks.
+    pub chapter_warning: Option<String>,
 }
 
 impl LevelReport {
@@ -120,6 +125,9 @@ impl LevelReport {
                 self.target_lufs
             ));
         }
+        if let Some(warning) = &self.chapter_warning {
+            warnings.push(warning.clone());
+        }
         warnings
     }
 
@@ -133,6 +141,7 @@ impl LevelReport {
                 "integrated_lufs": db_json(self.output_loudness.integrated_lufs),
                 "lra_lu": db_json(self.output_loudness.lra_lu),
                 "true_peak_dbtp": db_json(self.output_loudness.true_peak_dbtp),
+                "chapters": self.chapters_written,
             },
             "gain": {
                 "median_db": db_json(self.gain_db),
@@ -171,6 +180,9 @@ impl fmt::Display for LevelReport {
             "  true peak    {:.1} → {:.1} dBTP",
             self.input.loudness.true_peak_dbtp, self.output_loudness.true_peak_dbtp
         )?;
+        if self.chapters_written > 0 {
+            write!(f, "\n  chapters     {}", self.chapters_written)?;
+        }
         for warning in self.warnings() {
             write!(f, "\n  note: {warning}")?;
         }
@@ -259,23 +271,39 @@ mod tests {
             gain_clamped: true,
             silent_input: false,
             target_lufs: -16.0,
+            chapters_written: 3,
+            chapter_warning: None,
         };
         let text = report.to_string();
         assert!(text.contains("ep.wav → ep.leveled.wav"));
         assert!(text.contains("(gain +13.8 dB)"));
         assert!(text.contains("+9.1 … +15.0 dB"));
         assert!(text.contains("capped at +15.0 dB"));
+        assert!(text.contains("chapters     3"));
 
         let flat = LevelReport {
             gain_db: 4.0,
             gain_min_db: 4.0,
             gain_max_db: 4.0,
             gain_clamped: false,
+            chapters_written: 0,
             ..report
         };
         let text = flat.to_string();
         assert!(!text.contains("gain range"));
         assert!(!text.contains("note:"));
+        assert!(!text.contains("chapters"));
+
+        let warned = LevelReport {
+            gain_clamped: false,
+            chapter_warning: Some("input chapters not carried over: no ffmpeg".into()),
+            ..flat
+        };
+        let text = warned.to_string();
+        assert!(
+            text.contains("note: input chapters not carried over"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -305,6 +333,8 @@ mod tests {
             gain_clamped: true,
             silent_input: false,
             target_lufs: -16.0,
+            chapters_written: 2,
+            chapter_warning: None,
         };
         let json = report.to_json(&Settings::default());
         assert_eq!(json["levelize"], env!("CARGO_PKG_VERSION"));
@@ -312,6 +342,7 @@ mod tests {
         assert_eq!(json["input"]["sample_rate"], 48_000);
         assert_eq!(json["input"]["integrated_lufs"], -31.04);
         assert_eq!(json["output"]["path"], "ep.leveled.wav");
+        assert_eq!(json["output"]["chapters"], 2);
         assert_eq!(json["gain"]["max_db"], 15.0);
         assert_eq!(json["settings"]["profile"], "podcast");
         assert_eq!(json["settings"]["leveling"], "normal");

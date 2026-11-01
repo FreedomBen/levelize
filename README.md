@@ -36,9 +36,11 @@ episode.wav → episode.leveled.wav
   stereo), and M4B/M4A (AAC via the `ffmpeg` binary; no length cap). Basic tags
   (title, artist, album, date, genre, comment, track) are copied over, and
   lossy output defaults to a lossy input's own measured bitrate.
-- **Audiobooks.** `-o book.m4b` writes an audiobook players resume and
-  `--chapters toc.txt` adds chapter marks from a plain text file — one
-  `TIME Title` line each, like `1:02:30 Part Two`.
+- **Audiobooks.** `-o book.m4b` writes an audiobook players resume. Chapter
+  marks already in the input — MP4 chapters or ID3 chapters in a podcast
+  MP3 — carry over automatically; `--chapters toc.txt` replaces them from a
+  plain text file (one `TIME Title` line each, like `1:02:30 Part Two`) and
+  `--no-chapters` strips them.
 - **Scriptable.** `--json` stats (one object per input), stdin/stdout filter
   mode, meaningful exit codes, and byte-deterministic output: the same input and
   settings produce the same file every time.
@@ -103,7 +105,8 @@ or `--ceiling` values always win.
 | `--bit-depth <d>`   | match input  | `16` \| `24` \| `32f` for WAV; `16` \| `24` for FLAC   |
 | `--mp3-bitrate <k>` | input, else 128/96 | CBR kbps for MP3 (stereo/mono default)           |
 | `--aac-bitrate <k>` | input, else 96/64  | kbps for M4B/M4A (stereo/mono default)           |
-| `--chapters <file>` | none         | Chapter marks for M4B/M4A, one `TIME Title` per line   |
+| `--chapters <file>` | input's chapters | Chapter marks for M4B/M4A, one `TIME Title` per line |
+| `--no-chapters`     | off          | Don't carry the input's chapter marks into M4B/M4A     |
 | `--force`           | off          | Overwrite an existing output file                      |
 
 Run `levelize --help` for the full set. Exit codes: 0 success, 1 runtime
