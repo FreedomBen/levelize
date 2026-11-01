@@ -63,6 +63,25 @@ pub fn sine(rate: u32, channels: u16, freq: f64, amplitude_dbfs: f64, seconds: f
     sine_with_phase(rate, channels, freq, amplitude_dbfs, seconds, 0.0)
 }
 
+/// Interleaved white noise (xorshift64*, fixed seed), independent per
+/// sample — content lossy encoders can't compress below their bitrate
+/// target, for tests that measure output bitrates.
+pub fn noise(rate: u32, channels: u16, amplitude_dbfs: f64, seconds: f64) -> Vec<f32> {
+    let amplitude = 10f64.powf(amplitude_dbfs / 20.0);
+    let frames = (seconds * f64::from(rate)) as usize;
+    let mut state: u64 = 0x5EED_CAFE_F00D_D00D;
+    (0..frames * usize::from(channels))
+        .map(|_| {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let bits = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            let unit = (bits >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+            (amplitude * unit) as f32
+        })
+        .collect()
+}
+
 pub fn sine_with_phase(
     rate: u32,
     channels: u16,

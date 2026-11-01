@@ -75,6 +75,39 @@ pub enum Format {
     Flac,
     /// Requires `lame` in PATH at run time.
     Mp3,
+    /// AAC in an MP4 audiobook container; requires `ffmpeg` in PATH at run time.
+    M4b,
+    /// AAC in a plain MP4 audio container; requires `ffmpeg` in PATH at run time.
+    M4a,
+}
+
+impl Format {
+    /// The conventional file extension.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Format::Wav => "wav",
+            Format::Flac => "flac",
+            Format::Mp3 => "mp3",
+            Format::M4b => "m4b",
+            Format::M4a => "m4a",
+        }
+    }
+
+    /// Display name for messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            Format::Wav => "WAV",
+            Format::Flac => "FLAC",
+            Format::Mp3 => "MP3",
+            Format::M4b => "M4B",
+            Format::M4a => "M4A",
+        }
+    }
+
+    /// The AAC-in-MP4 outputs, rendered by ffmpeg.
+    pub fn is_aac(self) -> bool {
+        matches!(self, Format::M4b | Format::M4a)
+    }
 }
 
 /// Output sample format for WAV/FLAC.
@@ -105,8 +138,14 @@ pub struct Settings {
     pub format: Format,
     /// `None` matches the input's bit depth.
     pub bit_depth: Option<BitDepth>,
-    /// CBR bitrate for MP3 output; `None` picks 128 kbps stereo / 96 mono.
+    /// CBR bitrate for MP3 output; `None` matches a lossy input's measured
+    /// bitrate, else picks 128 kbps stereo / 96 mono.
     pub mp3_bitrate_kbps: Option<u32>,
+    /// Bitrate for M4B/M4A (AAC) output; `None` matches a lossy input's
+    /// measured bitrate, else picks 96 kbps stereo / 64 mono.
+    pub aac_bitrate_kbps: Option<u32>,
+    /// Chapter marks for M4B/M4A output.
+    pub chapters: Vec<encode::Chapter>,
 }
 
 impl Default for Settings {
@@ -121,6 +160,8 @@ impl Default for Settings {
             format: Format::Wav,
             bit_depth: None,
             mp3_bitrate_kbps: None,
+            aac_bitrate_kbps: None,
+            chapters: Vec::new(),
         }
     }
 }
@@ -138,11 +179,33 @@ impl Settings {
             .unwrap_or_else(|| self.profile.ceiling_dbtp())
     }
 
-    /// Effective MP3 bitrate in kbps for an input with `channels` channels.
-    pub fn mp3_bitrate_for(&self, channels: u16) -> u32 {
+    /// Effective MP3 bitrate in kbps: the explicit setting, else a lossy
+    /// input's own bitrate snapped to MP3's CBR steps, else the default for
+    /// the channel count.
+    pub fn mp3_bitrate_for(&self, channels: u16, input_kbps: Option<u32>) -> u32 {
         self.mp3_bitrate_kbps
+            .or(input_kbps.map(nearest_mp3_bitrate))
             .unwrap_or(if channels == 1 { 96 } else { 128 })
     }
+
+    /// Effective AAC bitrate in kbps: the explicit setting, else a lossy
+    /// input's own bitrate, else the default for the channel count.
+    pub fn aac_bitrate_for(&self, channels: u16, input_kbps: Option<u32>) -> u32 {
+        self.aac_bitrate_kbps
+            .or(input_kbps)
+            .unwrap_or(if channels == 1 { 64 } else { 96 })
+    }
+}
+
+/// The nearest bitrate MP3 CBR can carry (MPEG-1 Layer III); ties snap down.
+fn nearest_mp3_bitrate(kbps: u32) -> u32 {
+    const STEPS: [u32; 14] = [
+        32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ];
+    STEPS
+        .into_iter()
+        .min_by_key(|step| step.abs_diff(kbps))
+        .expect("the table is not empty")
 }
 
 /// Decode one input end to end and meter it.
@@ -150,7 +213,7 @@ fn measure(path: &Path) -> Result<(decode::InputInfo, u64, meter::Loudness)> {
     let decoder = decode::Decoder::open(path)?;
     let info = *decoder.info();
     let mut meter = meter::Meter::new(info.sample_rate, info.channels)?;
-    let frames = decoder.stream(|chunk| meter.feed(chunk))?;
+    let frames = decoder.stream(|chunk| meter.feed(chunk))?.frames;
     Ok((info, frames, meter.finish()?))
 }
 
@@ -179,6 +242,7 @@ enum Writer {
     Wav(encode::WavWriter<Box<dyn Write + Send>>),
     Flac(Box<encode::FlacWriter<Box<dyn Write + Send>>>),
     Mp3(encode::Mp3Writer),
+    Aac(encode::AacWriter),
 }
 
 impl Writer {
@@ -187,6 +251,7 @@ impl Writer {
             Writer::Wav(writer) => writer.write_frames(interleaved),
             Writer::Flac(writer) => writer.write_frames(interleaved),
             Writer::Mp3(writer) => writer.write_frames(interleaved),
+            Writer::Aac(writer) => writer.write_frames(interleaved),
         }
     }
 
@@ -195,6 +260,7 @@ impl Writer {
             Writer::Wav(writer) => writer.finish().map(|()| None),
             Writer::Flac(writer) => writer.finish().map(Some),
             Writer::Mp3(writer) => writer.finish().map(|()| None),
+            Writer::Aac(writer) => writer.finish().map(|()| None),
         }
     }
 }
@@ -202,12 +268,13 @@ impl Writer {
 /// Output bit depth for the format: the explicit setting, else the source
 /// depth, else 16-bit — with float mapped into FLAC's integer range.
 fn resolve_bit_depth(settings: &Settings, source: Option<BitDepth>) -> Result<BitDepth> {
-    if settings.format == Format::Mp3 {
+    if settings.format == Format::Mp3 || settings.format.is_aac() {
         ensure!(
             settings.bit_depth.is_none(),
-            "MP3 output has no bit depth; drop --bit-depth"
+            "{} output has no bit depth; drop --bit-depth",
+            settings.format.label()
         );
-        return Ok(BitDepth::Int16); // fed to the WAV pipe's spec only
+        return Ok(BitDepth::Int16); // a placeholder; the encoder pipes take floats
     }
     let depth = settings.bit_depth.or(source).unwrap_or(BitDepth::Int16);
     if settings.format == Format::Flac && depth == BitDepth::Float32 {
@@ -247,6 +314,13 @@ pub fn level_with_progress(
     if settings.format == Format::Mp3 {
         encode::check_lame()?;
     }
+    if settings.format.is_aac() {
+        encode::check_ffmpeg()?;
+    }
+    ensure!(
+        settings.chapters.is_empty() || settings.format.is_aac(),
+        "chapters apply to M4B/M4A output only"
+    );
 
     let decoder = decode::Decoder::open(input)?;
     let info = *decoder.info();
@@ -255,7 +329,7 @@ pub fn level_with_progress(
     let declared_secs = info.total_frames.map(|frames| frames as f64 / rate);
     let mut analyzer = plan::Analyzer::new(info.sample_rate, info.channels)?;
     let mut decoded: u64 = 0;
-    decoder.stream(|chunk| {
+    let streamed = decoder.stream(|chunk| {
         decoded += (chunk.len() / usize::from(info.channels)) as u64;
         progress(Phase::Analyze, decoded as f64 / rate, declared_secs);
         analyzer.feed(chunk)
@@ -263,6 +337,12 @@ pub fn level_with_progress(
     let analysis = analyzer.finish()?;
     let frames = analysis.frames;
     let input_loudness = analysis.loudness;
+
+    // A lossy input's measured bitrate is the default for lossy output.
+    let input_kbps = (info.lossy && frames > 0).then(|| {
+        let kbps = streamed.compressed_bytes as f64 * 8.0 * rate / (frames as f64 * 1000.0);
+        (kbps.round() as u32).clamp(32, 320)
+    });
 
     let target_lufs = settings.target_for(info.channels);
     let curve = plan::plan(&analysis, settings, target_lufs);
@@ -293,8 +373,20 @@ pub fn level_with_progress(
             info.sample_rate,
             info.channels,
             frames,
-            settings.mp3_bitrate_for(info.channels),
+            settings.mp3_bitrate_for(info.channels, input_kbps),
             &tags,
+        )?),
+        Format::M4b | Format::M4a => Writer::Aac(encode::AacWriter::new(
+            sink,
+            encode::AacSpec {
+                sample_rate: info.sample_rate,
+                channels: info.channels,
+                total_frames: frames,
+                bitrate_kbps: settings.aac_bitrate_for(info.channels, input_kbps),
+                audiobook: settings.format == Format::M4b,
+            },
+            &tags,
+            &settings.chapters,
         )?),
     };
     let mut out_meter = meter::Meter::new(info.sample_rate, info.channels)?;
@@ -393,15 +485,26 @@ mod tests {
     }
 
     #[test]
-    fn mp3_bitrate_defaults_follow_channel_count() {
+    fn lossy_bitrates_follow_flag_then_input_then_channel_count() {
         let settings = Settings::default();
-        assert_eq!(settings.mp3_bitrate_for(1), 96);
-        assert_eq!(settings.mp3_bitrate_for(2), 128);
+        assert_eq!(settings.mp3_bitrate_for(1, None), 96);
+        assert_eq!(settings.mp3_bitrate_for(2, None), 128);
+        assert_eq!(settings.aac_bitrate_for(1, None), 64);
+        assert_eq!(settings.aac_bitrate_for(2, None), 96);
 
+        // A lossy input's own bitrate beats the static default — snapped to
+        // a real CBR step for MP3 (ties snap down), taken as-is for AAC.
+        assert_eq!(settings.aac_bitrate_for(2, Some(187)), 187);
+        assert_eq!(settings.mp3_bitrate_for(2, Some(187)), 192);
+        assert_eq!(settings.mp3_bitrate_for(2, Some(144)), 128);
+
+        // The explicit flag beats both.
         let settings = Settings {
             mp3_bitrate_kbps: Some(64),
+            aac_bitrate_kbps: Some(48),
             ..Settings::default()
         };
-        assert_eq!(settings.mp3_bitrate_for(2), 64);
+        assert_eq!(settings.mp3_bitrate_for(2, Some(187)), 64);
+        assert_eq!(settings.aac_bitrate_for(2, Some(187)), 48);
     }
 }

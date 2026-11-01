@@ -23,6 +23,8 @@ Examples:
   levelize episode.wav                      write episode.leveled.wav at the podcast target
   levelize --profile audiobook book.flac    ACX-friendly: -20 LUFS under a -3 dBTP ceiling
   levelize ep.mp3 -o ep.leveled.mp3         MP3 in and out (MP3 output runs `lame`)
+  levelize book.flac -o book.m4b \\
+           --chapters toc.txt               M4B audiobook with chapter marks (runs `ffmpeg`)
   levelize --analyze *.wav                  measure only; write nothing
   levelize --json ep.wav | jq .gain         machine-readable stats on stdout
   cat ep.wav | levelize - -o - > out.wav    filter mode: stdin to stdout"
@@ -68,9 +70,19 @@ pub struct Cli {
     #[arg(long, value_enum, value_name = "DEPTH")]
     pub bit_depth: Option<BitDepth>,
 
-    /// CBR bitrate for MP3 output [default: 128 stereo / 96 mono]
+    /// CBR bitrate for MP3 output [default: a lossy input's own bitrate, else 128 stereo / 96 mono]
     #[arg(long, value_name = "KBPS")]
     pub mp3_bitrate: Option<u32>,
+
+    /// Bitrate for M4B/M4A output [default: a lossy input's own bitrate, else 96 stereo / 64 mono]
+    #[arg(long, value_name = "KBPS")]
+    pub aac_bitrate: Option<u32>,
+
+    /// Chapter marks for M4B/M4A output: a text file with one chapter per
+    /// line as `TIME Title`, where TIME is [H:]MM:SS[.sss] or plain seconds
+    /// (`#` comments and blank lines are skipped)
+    #[arg(long, value_name = "FILE", verbatim_doc_comment)]
+    pub chapters: Option<PathBuf>,
 
     /// Analysis pass only: print loudness stats, write nothing
     #[arg(long, conflicts_with = "output")]

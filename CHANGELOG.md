@@ -22,8 +22,15 @@ on today's loudness standards as a single fast CLI.
 - True-peak limiting: a 4×-oversampled lookahead limiter guarantees the
   ceiling (−1.5 dBTP default) against intersample peaks.
 - Inputs: WAV, AIFF, FLAC, MP3, AAC/M4A, Ogg Vorbis; mono and stereo.
-  Outputs: WAV, FLAC, and MP3 (via `lame`; one MP3 render caps at ~3 h of
-  stereo), with basic tags copied over.
+  Outputs: WAV, FLAC, MP3 (via `lame`; one MP3 render caps at ~3 h of
+  stereo), and M4B/M4A (AAC via `ffmpeg`; no length cap), with basic tags
+  copied over.
+- Audiobook output: `.m4b` carries the iTunes audiobook marker so players
+  resume playback, and `--chapters` adds chapter marks from a plain
+  `TIME Title` text file.
+- Lossy outputs default to the input's own measured bitrate when the input
+  is itself lossy (`--mp3-bitrate`/`--aac-bitrate` override; lossless inputs
+  get 128/96 kbps MP3 and 96/64 kbps AAC for stereo/mono).
 - `--analyze` measurement mode, `--json` stats (one object per input),
   stdin/stdout filter mode, progress bar, meaningful exit codes (0/1/2), and
   byte-deterministic output.

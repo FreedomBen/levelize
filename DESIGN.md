@@ -32,7 +32,7 @@ pipeline, distributed as a single static binary.
 - **Offline advantage.** Two-pass design with full lookahead — the reason the original
   sounded better than real-time AGC.
 - **Common formats in** (WAV, AIFF, FLAC, MP3, AAC/M4A, Ogg Vorbis); **WAV and FLAC out**,
-  plus MP3 when `lame` is installed.
+  plus MP3 when `lame` is installed and M4B/M4A (AAC, with chapter marks) when `ffmpeg` is.
 - **Fast and bounded.** ≥ 50× real-time; memory stays flat regardless of file length.
 - **Scriptable.** Meaningful exit codes, logs to stderr, `--json` stats, stdin/stdout
   piping, deterministic output (same input + flags → byte-identical file).
@@ -44,10 +44,11 @@ pipeline, distributed as a single static binary.
 - Music mastering — the algorithm is tuned for speech.
 - Multitrack mixing or per-speaker track processing (process the mixdown).
 - Speaker diarization or per-voice targets — levelize treats the mix as one program.
-- Lossy output beyond MP3-via-`lame` (no built-in AAC or Opus encoding).
+- Built-in lossy encoders — MP3 shells out to `lame`, AAC to `ffmpeg`; no Opus output.
 - Noise reduction, de-essing, EQ, or other repair.
 - More than 2 channels (clear error message).
-- Metadata beyond basic text tags — no artwork, chapter markers, or full ID3 fidelity.
+- Metadata beyond basic text tags and M4B/M4A chapter marks — no artwork or full ID3
+  fidelity, and no reading of chapters out of input files.
 
 ## CLI
 
@@ -59,6 +60,7 @@ levelize [OPTIONS] <INPUT>...
 levelize episode.wav                        # → episode.leveled.wav
 levelize -o out/ep12.flac raw/ep12.wav      # output format from the extension
 levelize --format mp3 episode.wav           # → episode.leveled.mp3 (uses lame)
+levelize book.flac -o book.m4b --chapters toc.txt   # chaptered audiobook (uses ffmpeg)
 levelize --profile audiobook book.flac      # ACX-friendly preset
 levelize --target -19 interview.mp3         # override loudness target
 levelize --analyze *.wav                    # measure and report only, no output
@@ -71,7 +73,7 @@ ffmpeg -i raw.mov -f wav - | levelize - -o episode.wav   # stdin works too
 | Flag                            | Default                   | Description                                                     |
 | ------------------------------- | ------------------------- | --------------------------------------------------------------- |
 | `-o, --output <path>`           | `<input>.leveled.<ext>`   | Output file, or `-` for stdout (only valid with a single input) |
-| `--format <fmt>`                | from `-o` ext, else `wav` | `wav` \| `flac` \| `mp3` (MP3 shells out to `lame`)             |
+| `--format <fmt>`                | from `-o` ext, else `wav` | `wav` \| `flac` \| `mp3` \| `m4b` \| `m4a` (MP3 shells out to `lame`; M4B/M4A to `ffmpeg`) |
 | `--profile <name>`              | `podcast`                 | Loudness preset: `podcast` \| `broadcast` \| `audiobook`        |
 | `--target <lufs>`               | per profile               | Integrated loudness target; overrides the profile               |
 | `--ceiling <dbtp>`              | per profile               | True-peak ceiling; overrides the profile                        |
@@ -79,7 +81,9 @@ ffmpeg -i raw.mov -f wav - | levelize - -o episode.wav   # stdin works too
 | `--max-cut <db>`                | 15                        | Cap on downward gain                                            |
 | `--leveling <mode>`             | `normal`                  | `gentle` \| `normal` \| `aggressive` — how hard levels converge |
 | `--bit-depth <depth>`           | match input               | `16` \| `24` \| `32f` for WAV; `16` \| `24` for FLAC            |
-| `--mp3-bitrate <kbps>`          | 128 stereo / 96 mono      | CBR bitrate for MP3 output                                      |
+| `--mp3-bitrate <kbps>`          | input's, else 128 st / 96 mono | CBR bitrate for MP3 output (a lossy input's measured bitrate wins, snapped to MP3's CBR steps) |
+| `--aac-bitrate <kbps>`          | input's, else 96 st / 64 mono  | Bitrate for M4B/M4A output (a lossy input's measured bitrate wins)                             |
+| `--chapters <file>`             | none                      | Chapter marks for M4B/M4A: one `TIME Title` line each, `[H:]MM:SS[.sss]` or plain seconds      |
 | `--analyze`                     | off                       | Analysis pass only: print loudness stats, write nothing         |
 | `--json`                        | off                       | Emit stats as JSON on stdout                                    |
 | `--force`                       | off                       | Allow overwriting an existing output file                       |
@@ -116,6 +120,15 @@ a −3 dBTP ceiling lands typical speech comfortably within those bounds.
   `lame` is fed 32-bit float WAV over a pipe, which caps one MP3 render at WAV's 4 GB
   limit — about 3 hours of stereo at 48 kHz (twice that mono). The cap is checked after
   pass 1, before any rendering, with an error that says what to do instead.
+- M4B/M4A output shells out to `ffmpeg` (its built-in AAC encoder), with the same
+  fail-early check. It is fed raw 32-bit floats — no WAV framing, so no length cap — and
+  muxes into a temp file, because MP4 needs a seekable output; the finished file is then
+  copied to the real destination, so `-o -` still works. The muxer runs with `faststart`
+  (index up front) and `bitexact` (deterministic output). A `.m4b` additionally gets the
+  iTunes audiobook atom (`stik` = 2) so players remember the position; `--chapters` marks
+  are passed through as an ffmetadata file. A lossy *input*'s measured bitrate (packet
+  bytes over duration, so tags and cover art don't inflate it) becomes the default output
+  bitrate for both MP3 and AAC; lossless inputs fall back to the static defaults.
 - Non-finite samples (NaN, ±inf — broken float WAVs have them) are replaced with silence
   at the decode boundary: untreated, one NaN poisons the loudness filters for the rest of
   the file and would pass into the output.
@@ -173,7 +186,7 @@ Pass 1 — analyze (streaming decode)
 
 Pass 2 — render (streaming decode)
   input ─▶ decode ─▶ apply gain curve (dB-linear interpolation)
-                   ─▶ true-peak limiter (ceiling) ─▶ dither ─▶ encode (WAV | FLAC | MP3)
+                   ─▶ true-peak limiter (ceiling) ─▶ dither ─▶ encode (WAV | FLAC | MP3 | M4B/M4A)
 ```
 
 ### Pass 1 — analysis and gain planning
@@ -227,9 +240,9 @@ Pass 2 — render (streaming decode)
    release, hard ceiling guarantee. With the trim landing loudness on target, the limiter
    only catches transients; its gain reduction costs at most a fraction of an LU.
 4. **Dither** (TPDF, 1 LSB) when quantizing to 16-bit; none at 24-bit/32f or on the MP3
-   path, which is fed float samples.
-5. **Encode:** streaming WAV or FLAC writer, or pipe to `lame` for MP3 — with basic tags
-   copied over (see Metadata).
+   and AAC paths, which are fed float samples.
+5. **Encode:** streaming WAV or FLAC writer, or pipe to `lame` for MP3 or `ffmpeg` for
+   M4B/M4A — with basic tags copied over (see Metadata).
 
 ### Channels, rates, edge cases
 
@@ -248,8 +261,10 @@ Pass 2 — render (streaming decode)
 Basic text tags are copied from input to output: title, artist, album/show, date, genre,
 comment, and track number. They are read through symphonia's metadata API (ID3v2, Vorbis
 comment, RIFF INFO) and written in the output's native form — RIFF INFO for WAV, Vorbis
-comments for FLAC, ID3 via `lame`'s tag arguments for MP3. Artwork, chapter markers, and
-nonstandard tags are not carried over in v1.
+comments for FLAC, ID3 via `lame`'s tag arguments for MP3, iTunes atoms via `ffmpeg`'s
+metadata arguments for M4B/M4A. Chapter marks can be *added* to M4B/M4A from a text file
+(`--chapters`), but artwork, chapters already in an input, and nonstandard tags are not
+carried over in v1.
 
 ## Technology
 
@@ -276,8 +291,8 @@ nonstandard tags are not carried over in v1.
 | `tempfile`   | Stdin spilled to a rereadable temp file; test fixtures      |
 | `anyhow`     | Error handling                                              |
 
-No runtime dependency on ffmpeg or any system library; the one optional external is the
-`lame` binary for MP3 output, run as a child process. The gain planner, limiter, dither, and
+No linked system libraries; the only externals are optional binaries run as child
+processes — `lame` for MP3 output and `ffmpeg` for M4B/M4A. The gain planner, limiter, dither, and
 WAV writer are hand-rolled — the DSP because it is small, well-understood, and the heart of
 the product; the WAV writer because pass 1 fixes the sample count, which lets it write
 headers up front (pipe-friendly) and RIFF INFO tags, neither of which off-the-shelf writers
@@ -295,7 +310,7 @@ src/
   meter.rs       BS.1770 measurements, block energies, noise-floor estimate
   plan.rs        Classification, raw curve, smoothing, static trim → GainCurve
   render.rs      Gain application, true-peak limiter, dither
-  encode.rs      WAV/FLAC writers, lame pipe for MP3, tag mapping
+  encode.rs      WAV/FLAC writers, lame/ffmpeg pipes for MP3 and M4B/M4A, tags, chapters
   stats.rs       Human + JSON report types
 ```
 
@@ -340,8 +355,10 @@ Decoding twice instead of caching PCM is the deliberate trade: a 3-hour stereo f
 - **Edge cases:** empty and sub-hop inputs copy through cleanly; truncated files level
   what's there; NaN/±inf samples are silenced, never propagated; >2 channels and non-audio
   files fail cleanly without stopping a batch; 8 kHz and 192 kHz still land on target.
-- **Output formats:** FLAC output decodes back bit-identical to the equivalent WAV; MP3 and
-  stdin/stdout paths covered by round-trip integration tests (CI installs `lame`).
+- **Output formats:** FLAC output decodes back bit-identical to the equivalent WAV; MP3,
+  M4B/M4A (tags, chapters, the audiobook atom, bitrate matching), and stdin/stdout paths
+  covered by round-trip integration tests (CI installs `lame` and `ffmpeg` on the Linux
+  runner; the tests skip themselves where the encoders are missing).
 - CI: `cargo test` + clippy + fmt on a Linux/macOS/Windows matrix.
 
 ## Distribution
@@ -359,9 +376,9 @@ Decoding twice instead of caching PCM is the deliberate trade: a 3-hour stereo f
 ## License
 
 AGPLv3 (SPDX: `AGPL-3.0-or-later`). All crates in the dependency table are MIT/Apache-2.0
-dual-licensed, which is compatible with AGPL distribution. `lame` (LGPL) is invoked as a
-separate process, never linked, so it imposes nothing on levelize's licensing. AGPL crates
-publish to crates.io without issue.
+dual-licensed, which is compatible with AGPL distribution. `lame` (LGPL) and `ffmpeg`
+(LGPL/GPL) are invoked as separate processes, never linked, so they impose nothing on
+levelize's licensing. AGPL crates publish to crates.io without issue.
 
 ## Milestones
 

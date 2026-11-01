@@ -1,14 +1,17 @@
-//! Encoders: WAV and FLAC writers, plus MP3 via a `lame` child process.
+//! Encoders: WAV and FLAC writers, plus MP3 via a `lame` child process and
+//! M4B/M4A (AAC in MP4) via an `ffmpeg` child process.
 //!
 //! Pass 1 fixes the exact frame count, so headers are written up front and no
 //! writer ever seeks — pipes work. (For FLAC files, [`patch_flac_header`] can
 //! fill in the MD5 and frame-size fields afterwards; on pipes they stay at
-//! "unknown", which the spec allows.) TPDF dither is applied when quantizing
-//! to 16-bit, from a fixed-seed generator so runs are byte-identical; the MP3
-//! path is fed 32-bit float WAV, so nothing is quantized before `lame`.
+//! "unknown", which the spec allows. MP4 is the exception: its muxer must
+//! seek, so ffmpeg writes a temp file that is then copied to the sink.) TPDF
+//! dither is applied when quantizing to 16-bit, from a fixed-seed generator
+//! so runs are byte-identical; the MP3 and AAC paths are fed 32-bit floats,
+//! so nothing is quantized before the encoder.
 
-use std::io::{ErrorKind, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::{BufWriter, ErrorKind, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread::JoinHandle;
 
@@ -536,6 +539,296 @@ fn leading_year(date: &str) -> &str {
     &date[..digits]
 }
 
+pub fn check_ffmpeg() -> Result<()> {
+    match Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            bail!("M4B/M4A output needs `ffmpeg` on PATH")
+        }
+        Err(error) => Err(error).context("running ffmpeg"),
+    }
+}
+
+/// One chapter mark for M4B/M4A output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chapter {
+    pub start_secs: f64,
+    pub title: String,
+}
+
+/// Parse a chapters file: one `TIME Title` per line, where TIME is
+/// `[[H:]M:]S[.sss]`. Blank lines and `#` comments are skipped; times must
+/// increase.
+pub fn load_chapters(path: &Path) -> Result<Vec<Chapter>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read chapters file {}", path.display()))?;
+    let mut chapters: Vec<Chapter> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let at = |what: &str| format!("{}:{}: {what}", path.display(), index + 1);
+        let Some((stamp, title)) = line.split_once(char::is_whitespace) else {
+            bail!("{}", at("expected `TIME Title`"));
+        };
+        let Some(start_secs) = parse_timestamp(stamp) else {
+            bail!("{}", at("bad time; use [H:]MM:SS[.sss] or plain seconds"));
+        };
+        let title = title.trim();
+        if title.is_empty() {
+            bail!("{}", at("chapter title is empty"));
+        }
+        if let Some(last) = chapters.last()
+            && start_secs <= last.start_secs
+        {
+            bail!("{}", at("chapter times must increase"));
+        }
+        chapters.push(Chapter {
+            start_secs,
+            title: title.to_string(),
+        });
+    }
+    ensure!(
+        !chapters.is_empty(),
+        "{}: no chapters found",
+        path.display()
+    );
+    Ok(chapters)
+}
+
+/// `[[H:]M:]S[.sss]` → seconds. Only the last part may be fractional, and
+/// parts after the first must stay below 60.
+fn parse_timestamp(stamp: &str) -> Option<f64> {
+    let parts: Vec<&str> = stamp.split(':').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut secs = 0.0;
+    for (index, part) in parts.iter().enumerate() {
+        let last = index == parts.len() - 1;
+        let digits = |c: char| c.is_ascii_digit() || (last && c == '.');
+        if part.is_empty() || !part.chars().all(digits) {
+            return None;
+        }
+        let value: f64 = part.parse().ok()?;
+        if index > 0 && value >= 60.0 {
+            return None;
+        }
+        secs = secs * 60.0 + value;
+    }
+    Some(secs)
+}
+
+/// Serialize chapters in ffmpeg's ffmetadata format. Each chapter ends where
+/// the next begins; the last ends at the duration.
+fn ffmetadata_chapters(chapters: &[Chapter], duration_secs: f64) -> String {
+    fn escape(text: &str) -> String {
+        let mut escaped = String::with_capacity(text.len());
+        for c in text.chars() {
+            if matches!(c, '=' | ';' | '#' | '\\' | '\n') {
+                escaped.push('\\');
+            }
+            escaped.push(c);
+        }
+        escaped
+    }
+    let mut meta = String::from(";FFMETADATA1\n");
+    for (index, chapter) in chapters.iter().enumerate() {
+        let end_secs = chapters
+            .get(index + 1)
+            .map_or(duration_secs, |next| next.start_secs);
+        meta.push_str(&format!(
+            "[CHAPTER]\nTIMEBASE=1/1000\nSTART={}\nEND={}\ntitle={}\n",
+            (chapter.start_secs * 1000.0).round() as u64,
+            (end_secs * 1000.0).round() as u64,
+            escape(&chapter.title)
+        ));
+    }
+    meta
+}
+
+/// The sample rates AAC (and ffmpeg's encoder) can represent.
+const AAC_SAMPLE_RATES: [u32; 13] = [
+    7_350, 8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 64_000, 88_200,
+    96_000,
+];
+
+/// Fixed parameters for one M4B/M4A render.
+#[derive(Debug, Clone, Copy)]
+pub struct AacSpec {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub total_frames: u64,
+    pub bitrate_kbps: u32,
+    /// Mark the file as an audiobook (the iTunes `stik` atom, as in .m4b).
+    pub audiobook: bool,
+}
+
+/// AAC in MP4 (M4B/M4A) via `ffmpeg`: raw 32-bit float samples stream into
+/// the child's stdin — no WAV framing, so no 4 GB cap — and ffmpeg muxes
+/// into a temp file (MP4 needs a seekable output), which [`AacWriter::finish`]
+/// copies to the sink.
+pub struct AacWriter {
+    sink: Box<dyn Write + Send>,
+    stdin: BufWriter<ChildStdin>,
+    child: Child,
+    /// Owns the muxer's output until it is copied out; deleted on drop.
+    tmp: tempfile::TempDir,
+    out_path: PathBuf,
+    scratch: Vec<u8>,
+    channels: u16,
+    frames_written: u64,
+    total_frames: u64,
+}
+
+impl AacWriter {
+    pub fn new(
+        sink: Box<dyn Write + Send>,
+        spec: AacSpec,
+        tags: &Tags,
+        chapters: &[Chapter],
+    ) -> Result<Self> {
+        ensure!(
+            AAC_SAMPLE_RATES.contains(&spec.sample_rate),
+            "AAC supports standard sample rates up to 96 kHz, not {} Hz; write WAV or FLAC instead",
+            spec.sample_rate
+        );
+        let duration_secs = spec.total_frames as f64 / f64::from(spec.sample_rate);
+        if let Some(last) = chapters.last() {
+            ensure!(
+                last.start_secs < duration_secs,
+                "chapter \"{}\" starts at {:.3} s, past the end of the audio ({:.3} s)",
+                last.title,
+                last.start_secs,
+                duration_secs
+            );
+        }
+        let tmp = tempfile::TempDir::with_prefix("levelize-mux-")
+            .context("creating a temp dir for the MP4 muxer")?;
+        let out_path = tmp
+            .path()
+            .join(if spec.audiobook { "out.m4b" } else { "out.m4a" });
+
+        let mut command = Command::new("ffmpeg");
+        command.args(["-hide_banner", "-loglevel", "error", "-f", "f32le"]);
+        command.arg("-ar").arg(spec.sample_rate.to_string());
+        command.arg("-ac").arg(spec.channels.to_string());
+        command.args(["-i", "-"]);
+        if !chapters.is_empty() {
+            let meta_path = tmp.path().join("chapters.ffmeta");
+            std::fs::write(&meta_path, ffmetadata_chapters(chapters, duration_secs))
+                .context("writing the chapter metadata file")?;
+            command.args(["-f", "ffmetadata", "-i"]).arg(&meta_path);
+            command.args(["-map", "0:a", "-map_chapters", "1"]);
+        }
+        command
+            .args(["-c:a", "aac", "-b:a"])
+            .arg(format!("{}k", spec.bitrate_kbps));
+        let fields = [
+            ("title", &tags.title),
+            ("artist", &tags.artist),
+            ("album", &tags.album),
+            ("date", &tags.date),
+            ("genre", &tags.genre),
+            ("comment", &tags.comment),
+            ("track", &tags.track),
+        ];
+        for (key, value) in fields {
+            if let Some(value) = value {
+                // NUL would be rejected as a process argument.
+                command
+                    .arg("-metadata")
+                    .arg(format!("{key}={}", value.replace('\0', "")));
+            }
+        }
+        if spec.audiobook {
+            // The iTunes media-type atom: 2 = audiobook (players resume).
+            command.args(["-metadata", "media_type=2"]);
+        }
+        // faststart fronts the index; bitexact keeps runs byte-identical.
+        command.args([
+            "-movflags",
+            "+faststart",
+            "-fflags",
+            "+bitexact",
+            "-flags",
+            "+bitexact",
+        ]);
+        command.args(["-f", "ipod"]).arg(&out_path);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                bail!("M4B/M4A output needs `ffmpeg` on PATH")
+            }
+            Err(error) => return Err(error).context("starting ffmpeg"),
+        };
+        let stdin = BufWriter::new(child.stdin.take().expect("stdin was piped"));
+        Ok(AacWriter {
+            sink,
+            stdin,
+            child,
+            tmp,
+            out_path,
+            scratch: Vec::new(),
+            channels: spec.channels,
+            frames_written: 0,
+            total_frames: spec.total_frames,
+        })
+    }
+
+    pub fn write_frames(&mut self, interleaved: &[f32]) -> Result<()> {
+        self.scratch.clear();
+        self.scratch.reserve(interleaved.len() * 4);
+        for sample in interleaved {
+            self.scratch.extend_from_slice(&sample.to_le_bytes());
+        }
+        self.stdin
+            .write_all(&self.scratch)
+            .context("feeding ffmpeg")?;
+        self.frames_written += (interleaved.len() / usize::from(self.channels)) as u64;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<()> {
+        let AacWriter {
+            mut sink,
+            stdin,
+            mut child,
+            tmp: _tmp, // outlives the copy below
+            out_path,
+            frames_written,
+            total_frames,
+            ..
+        } = self;
+        ensure!(
+            frames_written == total_frames,
+            "AAC writer closed with {frames_written} of {total_frames} frames"
+        );
+        // Closing stdin tells ffmpeg the stream is done.
+        drop(
+            stdin
+                .into_inner()
+                .map_err(|error| anyhow!("flushing ffmpeg's stdin: {}", error.error()))?,
+        );
+        let status = child.wait().context("waiting for ffmpeg")?;
+        ensure!(status.success(), "ffmpeg failed ({status})");
+        let mut muxed = std::fs::File::open(&out_path).context("reading the muxed MP4 back")?;
+        std::io::copy(&mut muxed, &mut sink).context("writing M4B/M4A output")?;
+        sink.flush().context("writing M4B/M4A output")?;
+        Ok(())
+    }
+}
+
 /// TPDF dither in (−1, 1) LSB from a fixed-seed xorshift64*; deterministic so
 /// identical runs produce identical bytes.
 struct Tpdf {
@@ -765,5 +1058,109 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn chapters_parse_times_and_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("toc.txt");
+        std::fs::write(
+            &path,
+            "# a comment\n\n0 Intro\n1:05 Middle part\n01:02:03.5 The End\n",
+        )
+        .unwrap();
+        let chapters = load_chapters(&path).unwrap();
+        assert_eq!(
+            chapters,
+            [
+                Chapter {
+                    start_secs: 0.0,
+                    title: "Intro".into()
+                },
+                Chapter {
+                    start_secs: 65.0,
+                    title: "Middle part".into()
+                },
+                Chapter {
+                    start_secs: 3723.5,
+                    title: "The End".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn chapters_reject_disorder_and_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("toc.txt");
+        let error_for = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            load_chapters(&path).unwrap_err().to_string()
+        };
+        let error = error_for("10 A\n5 B\n");
+        assert!(
+            error.contains(":2:") && error.contains("must increase"),
+            "{error}"
+        );
+        let error = error_for("eleven A\n");
+        assert!(error.contains("bad time"), "{error}");
+        let error = error_for("1:99 Overflowed seconds\n");
+        assert!(error.contains("bad time"), "{error}");
+        let error = error_for("5\n");
+        assert!(error.contains("TIME Title"), "{error}");
+        let error = error_for("# nothing but comments\n");
+        assert!(error.contains("no chapters"), "{error}");
+    }
+
+    #[test]
+    fn ffmetadata_escapes_and_chains_ends() {
+        let chapters = [
+            Chapter {
+                start_secs: 0.0,
+                title: "A = B; #1 \\".into(),
+            },
+            Chapter {
+                start_secs: 2.5,
+                title: "Two".into(),
+            },
+        ];
+        let meta = ffmetadata_chapters(&chapters, 5.0);
+        assert!(meta.starts_with(";FFMETADATA1\n"), "{meta}");
+        assert!(
+            meta.contains("START=0\nEND=2500\ntitle=A \\= B\\; \\#1 \\\\\n"),
+            "{meta}"
+        );
+        assert!(meta.contains("START=2500\nEND=5000\ntitle=Two\n"), "{meta}");
+    }
+
+    #[test]
+    fn aac_writer_rejects_bad_rates_and_late_chapters_before_spawning() {
+        let spec = AacSpec {
+            sample_rate: 192_000,
+            channels: 2,
+            total_frames: 192_000,
+            bitrate_kbps: 96,
+            audiobook: true,
+        };
+        let error = AacWriter::new(Box::new(std::io::sink()), spec, &Tags::default(), &[])
+            .err()
+            .map(|error| error.to_string())
+            .expect("a non-AAC rate must be rejected");
+        assert!(error.contains("96 kHz"), "{error}");
+
+        let spec = AacSpec {
+            sample_rate: 48_000,
+            total_frames: 48_000, // one second
+            ..spec
+        };
+        let late = [Chapter {
+            start_secs: 2.0,
+            title: "Late".into(),
+        }];
+        let error = AacWriter::new(Box::new(std::io::sink()), spec, &Tags::default(), &late)
+            .err()
+            .map(|error| error.to_string())
+            .expect("a chapter past the end must be rejected");
+        assert!(error.contains("past the end"), "{error}");
     }
 }

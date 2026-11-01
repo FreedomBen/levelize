@@ -32,9 +32,13 @@ episode.wav → episode.leveled.wav
 - **True-peak safe.** A 4×-oversampled lookahead limiter guarantees the ceiling
   (−1.5 dBTP by default) against intersample peaks.
 - **Formats.** Reads WAV, AIFF, FLAC, MP3, AAC/M4A, and Ogg Vorbis; writes WAV,
-  FLAC, and MP3 (via the `lame` binary; one MP3 render caps at about 3 hours of
-  stereo). Basic tags (title, artist, album, date, genre, comment, track) are
-  copied over.
+  FLAC, MP3 (via the `lame` binary; one MP3 render caps at about 3 hours of
+  stereo), and M4B/M4A (AAC via the `ffmpeg` binary; no length cap). Basic tags
+  (title, artist, album, date, genre, comment, track) are copied over, and
+  lossy output defaults to a lossy input's own measured bitrate.
+- **Audiobooks.** `-o book.m4b` writes an audiobook players resume and
+  `--chapters toc.txt` adds chapter marks from a plain text file — one
+  `TIME Title` line each, like `1:02:30 Part Two`.
 - **Scriptable.** `--json` stats (one object per input), stdin/stdout filter
   mode, meaningful exit codes, and byte-deterministic output: the same input and
   settings produce the same file every time.
@@ -59,8 +63,9 @@ cd levelize
 sudo make install
 ```
 
-MP3 *output* additionally needs the `lame` encoder on `PATH` at run time;
-everything else is pure Rust with no system dependencies.
+MP3 *output* additionally needs the `lame` encoder on `PATH` at run time, and
+M4B/M4A output needs `ffmpeg`; everything else is pure Rust with no system
+dependencies.
 
 ## Usage
 
@@ -70,6 +75,8 @@ levelize ep1.wav ep2.flac ep3.mp3         # each input to its own output
 levelize --profile audiobook book.flac    # ACX-friendly: -20 LUFS, -3 dBTP
 levelize --target -18 --ceiling -2 in.wav # explicit numbers beat the profile
 levelize ep.mp3 -o ep.leveled.mp3         # MP3 in and out
+levelize book.flac -o book.m4b \
+         --chapters toc.txt               # M4B audiobook with chapter marks
 levelize --analyze *.wav                  # measure only; write nothing
 levelize --json ep.wav | jq .gain         # machine-readable stats
 cat ep.wav | levelize - -o - > out.wav    # filter mode: stdin to stdout
@@ -94,6 +101,9 @@ or `--ceiling` values always win.
 | `--max-boost <db>`  | 15           | Cap on upward gain; protects the noise floor           |
 | `--max-cut <db>`    | 15           | Cap on downward gain                                   |
 | `--bit-depth <d>`   | match input  | `16` \| `24` \| `32f` for WAV; `16` \| `24` for FLAC   |
+| `--mp3-bitrate <k>` | input, else 128/96 | CBR kbps for MP3 (stereo/mono default)           |
+| `--aac-bitrate <k>` | input, else 96/64  | kbps for M4B/M4A (stereo/mono default)           |
+| `--chapters <file>` | none         | Chapter marks for M4B/M4A, one `TIME Title` per line   |
 | `--force`           | off          | Overwrite an existing output file                      |
 
 Run `levelize --help` for the full set. Exit codes: 0 success, 1 runtime
@@ -123,8 +133,9 @@ The test suite includes an EBU Tech 3341/3342 compliance subset for the meter,
 end-to-end acceptance tests for the leveling invariants (target accuracy,
 ceiling safety, idempotency, determinism), golden stats pinned against a
 deterministic speech-shaped fixture, and pathological-input coverage (empty,
-truncated, NaN-carrying, and non-audio files). MP3 and `flac -t` verification
-tests skip themselves when `lame` or `flac` aren't installed.
+truncated, NaN-carrying, and non-audio files). MP3, M4B/M4A, and `flac -t`
+verification tests skip themselves when `lame`, `ffmpeg`, or `flac` aren't
+installed.
 
 ## License
 

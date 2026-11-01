@@ -8,8 +8,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{
-    CODEC_TYPE_NULL, CODEC_TYPE_PCM_F32BE, CODEC_TYPE_PCM_F32LE, CODEC_TYPE_PCM_F64BE,
-    CODEC_TYPE_PCM_F64LE, Decoder as SymphoniaDecoder, DecoderOptions,
+    CODEC_TYPE_AAC, CODEC_TYPE_MP3, CODEC_TYPE_NULL, CODEC_TYPE_PCM_F32BE, CODEC_TYPE_PCM_F32LE,
+    CODEC_TYPE_PCM_F64BE, CODEC_TYPE_PCM_F64LE, CODEC_TYPE_VORBIS, Decoder as SymphoniaDecoder,
+    DecoderOptions,
 };
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
@@ -103,6 +104,9 @@ pub struct InputInfo {
     pub total_frames: Option<u64>,
     /// Source bit depth when known; leveled output matches it by default.
     pub source_depth: Option<BitDepth>,
+    /// True for lossy codecs (MP3, AAC, Vorbis); lossy output matches the
+    /// input's measured bitrate by default.
+    pub lossy: bool,
 }
 
 /// One opened input, ready to stream interleaved f32 chunks.
@@ -232,6 +236,10 @@ impl Decoder {
                 channels: channels as u16,
                 total_frames,
                 source_depth,
+                lossy: matches!(
+                    params.codec,
+                    CODEC_TYPE_MP3 | CODEC_TYPE_AAC | CODEC_TYPE_VORBIS
+                ),
             },
             tags,
         })
@@ -247,11 +255,12 @@ impl Decoder {
     }
 
     /// Streams the whole input to `sink` as interleaved f32 chunks of whole
-    /// frames; returns the number of frames decoded.
-    pub fn stream(mut self, mut sink: impl FnMut(&[f32]) -> Result<()>) -> Result<u64> {
+    /// frames; returns what was decoded.
+    pub fn stream(mut self, mut sink: impl FnMut(&[f32]) -> Result<()>) -> Result<Streamed> {
         let mut buffer: Option<SampleBuffer<f32>> = None;
         let mut scratch: Vec<f32> = Vec::new();
         let mut frames: u64 = 0;
+        let mut compressed_bytes: u64 = 0;
         loop {
             let packet = match self.format.next_packet() {
                 Ok(packet) => packet,
@@ -265,6 +274,7 @@ impl Decoder {
             if packet.track_id() != self.track_id {
                 continue;
             }
+            compressed_bytes += packet.buf().len() as u64;
             let decoded = self.decoder.decode(&packet).context("decoding input")?;
             let buffer = buffer.get_or_insert_with(|| {
                 SampleBuffer::new(decoded.capacity() as u64, *decoded.spec())
@@ -281,6 +291,20 @@ impl Decoder {
             frames += (samples.len() / usize::from(self.info.channels)) as u64;
             sink(samples)?;
         }
-        Ok(frames)
+        Ok(Streamed {
+            frames,
+            compressed_bytes,
+        })
     }
+}
+
+/// What one full [`Decoder::stream`] pass saw.
+#[derive(Debug, Clone, Copy)]
+pub struct Streamed {
+    /// Frames decoded.
+    pub frames: u64,
+    /// Bytes of coded audio read — packet payloads only, so tags, cover art,
+    /// and container overhead don't count. Divided by the duration this is
+    /// the input's true audio bitrate.
+    pub compressed_bytes: u64,
 }

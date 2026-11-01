@@ -9,6 +9,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use tempfile::NamedTempFile;
 
 use levelize::cli::Cli;
+use levelize::encode::{Chapter, load_chapters};
 use levelize::{AnalyzeReport, BitDepth, Format, LevelReport, Output, Phase, Settings};
 
 /// Cross-argument rules clap can't express; `Err` values are usage errors.
@@ -24,14 +25,28 @@ fn validate_args(cli: &Cli) -> Result<Format, String> {
         return Err("stdin input needs --output (or --analyze): there is no name to derive".into());
     }
     let format = effective_format(cli)?;
-    if format == Format::Mp3 && cli.bit_depth.is_some() {
-        return Err("--bit-depth does not apply to MP3 output".into());
+    if (format == Format::Mp3 || format.is_aac()) && cli.bit_depth.is_some() {
+        return Err(format!(
+            "--bit-depth does not apply to {} output",
+            format.label()
+        ));
     }
     if format == Format::Flac && cli.bit_depth == Some(BitDepth::Float32) {
         return Err("FLAC output supports --bit-depth 16 or 24".into());
     }
     if format != Format::Mp3 && cli.mp3_bitrate.is_some() {
         return Err("--mp3-bitrate requires MP3 output".into());
+    }
+    if !format.is_aac() && cli.aac_bitrate.is_some() {
+        return Err("--aac-bitrate requires M4B or M4A output".into());
+    }
+    if cli.chapters.is_some() {
+        if cli.analyze || !format.is_aac() {
+            return Err("--chapters requires M4B or M4A output".into());
+        }
+        if cli.inputs.len() > 1 {
+            return Err("--chapters takes a single input; the marks name one recording".into());
+        }
     }
     Ok(format)
 }
@@ -56,14 +71,16 @@ fn effective_format(cli: &Cli) -> Result<Format, String> {
         Some("wav") => Ok(Format::Wav),
         Some("flac") => Ok(Format::Flac),
         Some("mp3") => Ok(Format::Mp3),
+        Some("m4b") => Ok(Format::M4b),
+        Some("m4a") => Ok(Format::M4a),
         _ => Err(format!(
-            "cannot infer an output format from `{}`; pass --format wav|flac|mp3",
+            "cannot infer an output format from `{}`; pass --format wav|flac|mp3|m4b|m4a",
             path.display()
         )),
     }
 }
 
-fn build_settings(cli: &Cli, format: Format) -> Settings {
+fn build_settings(cli: &Cli, format: Format, chapters: Vec<Chapter>) -> Settings {
     Settings {
         profile: cli.profile,
         target_lufs: cli.target,
@@ -74,6 +91,8 @@ fn build_settings(cli: &Cli, format: Format) -> Settings {
         format,
         bit_depth: cli.bit_depth,
         mp3_bitrate_kbps: cli.mp3_bitrate,
+        aac_bitrate_kbps: cli.aac_bitrate,
+        chapters,
     }
 }
 
@@ -251,13 +270,8 @@ fn drive_bar(bar: &ProgressBar, phase: Phase, done_secs: f64, total_secs: Option
 
 /// `dir/episode.wav` → `dir/episode.leveled.<ext>`.
 fn default_output_path(input: &Path, format: Format) -> PathBuf {
-    let ext = match format {
-        Format::Wav => "wav",
-        Format::Flac => "flac",
-        Format::Mp3 => "mp3",
-    };
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    input.with_file_name(format!("{stem}.leveled.{ext}"))
+    input.with_file_name(format!("{stem}.leveled.{}", format.extension()))
 }
 
 fn check_output_path(input: &Path, output: &Path, force: bool) -> Result<()> {
@@ -320,7 +334,14 @@ fn main() -> ExitCode {
             .error(ErrorKind::ValueValidation, message)
             .exit(),
     };
-    let settings = build_settings(&cli, format);
+    // A bad chapters file blocks the whole run, so it is a usage-class error.
+    let chapters = match cli.chapters.as_deref().map(load_chapters).transpose() {
+        Ok(chapters) => chapters.unwrap_or_default(),
+        Err(error) => Cli::command()
+            .error(ErrorKind::ValueValidation, format!("{error:#}"))
+            .exit(),
+    };
+    let settings = build_settings(&cli, format, chapters);
     match run(&cli, &settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -457,10 +478,77 @@ mod tests {
     #[test]
     fn settings_carry_cli_values() {
         let cli = parse(&["levelize", "--target", "-20", "--max-boost", "9", "in.wav"]);
-        let settings = build_settings(&cli, Format::Wav);
+        let settings = build_settings(&cli, Format::Wav, Vec::new());
         assert_eq!(settings.target_lufs, Some(-20.0));
         assert_eq!(settings.max_boost_db, 9.0);
         assert_eq!(settings.target_for(2), -20.0);
+    }
+
+    #[test]
+    fn m4b_and_m4a_follow_the_output_extension() {
+        let cli = parse(&["levelize", "-o", "book.m4b", "in.wav"]);
+        assert_eq!(validate_args(&cli), Ok(Format::M4b));
+
+        let cli = parse(&["levelize", "-o", "EP.M4A", "in.wav"]);
+        assert_eq!(validate_args(&cli), Ok(Format::M4a));
+    }
+
+    #[test]
+    fn bit_depth_is_rejected_for_m4b_output() {
+        let cli = parse(&["levelize", "--bit-depth", "24", "-o", "out.m4b", "in.wav"]);
+        let error = validate_args(&cli).unwrap_err();
+        assert!(error.contains("M4B"), "{error}");
+    }
+
+    #[test]
+    fn aac_bitrate_needs_m4b_or_m4a_output() {
+        let cli = parse(&["levelize", "--aac-bitrate", "64", "in.wav"]);
+        let error = validate_args(&cli).unwrap_err();
+        assert!(error.contains("--aac-bitrate"), "{error}");
+
+        for output in ["out.m4b", "out.m4a"] {
+            let cli = parse(&["levelize", "--aac-bitrate", "64", "-o", output, "in.wav"]);
+            assert!(validate_args(&cli).is_ok(), "{output}");
+        }
+    }
+
+    #[test]
+    fn chapters_need_one_input_and_aac_output() {
+        let cli = parse(&[
+            "levelize",
+            "--chapters",
+            "toc.txt",
+            "-o",
+            "out.wav",
+            "in.wav",
+        ]);
+        let error = validate_args(&cli).unwrap_err();
+        assert!(error.contains("M4B or M4A"), "{error}");
+
+        let cli = parse(&[
+            "levelize",
+            "--chapters",
+            "toc.txt",
+            "--format",
+            "m4b",
+            "a.wav",
+            "b.wav",
+        ]);
+        let error = validate_args(&cli).unwrap_err();
+        assert!(error.contains("single input"), "{error}");
+
+        let cli = parse(&["levelize", "--chapters", "toc.txt", "--analyze", "in.wav"]);
+        assert!(validate_args(&cli).is_err());
+
+        let cli = parse(&[
+            "levelize",
+            "--chapters",
+            "toc.txt",
+            "-o",
+            "out.m4b",
+            "in.wav",
+        ]);
+        assert_eq!(validate_args(&cli), Ok(Format::M4b));
     }
 
     #[test]
@@ -476,6 +564,10 @@ mod tests {
         assert_eq!(
             default_output_path(Path::new("noext"), Format::Flac),
             PathBuf::from("noext.leveled.flac")
+        );
+        assert_eq!(
+            default_output_path(Path::new("book.wav"), Format::M4b),
+            PathBuf::from("book.leveled.m4b")
         );
     }
 
