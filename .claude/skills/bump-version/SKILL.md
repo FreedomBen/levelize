@@ -1,6 +1,6 @@
 ---
 name: bump-version
-description: Bump this project's release version to the version given as the first argument (e.g. /bump-version v0.0.2). Updates Cargo.toml, refreshes Cargo.lock, retitles or adds the CHANGELOG section, sweeps for stale version references, and verifies the build — without committing. Use whenever the user asks to bump, set, raise, or change the version, or to prepare the next release number.
+description: Bump this project's release version to the version given as the first argument (e.g. /bump-version v0.0.2). Updates Cargo.toml, refreshes Cargo.lock, updates the CHANGELOG section (checking git tags first, so a released version keeps its own notes), sweeps for stale version references, and verifies the build — without committing. Use whenever the user asks to bump, set, raise, or change the version, or to prepare the next release number.
 argument-hint: <version>
 ---
 
@@ -36,11 +36,24 @@ Work from the repo root. Three files carry the version:
    after the Cargo.toml edit. That rewrites only this package's lock entry
    and leaves dependency versions alone (never run a bare `cargo update`,
    which would bump dependencies too).
-3. **CHANGELOG.md** — make sure the new version has a section:
+3. **CHANGELOG.md** — make sure the new version has a section. Don't
+   trust an `unreleased` marker on the old version's section: the
+   RELEASING.md step that dates it can get skipped, so a shipped version
+   may still say "unreleased" (this exact case happened with 0.0.1).
+   Check `git tag -l "v<old>"` first, then:
    - A `## [<bare>]` section already exists → leave the file alone.
-   - The top section is for the old version and still marked
-     `unreleased` → retitle that heading to `## [<bare>] — unreleased`
-     (the pending notes simply get the new number).
+   - The top section is the old version, marked `unreleased`, and **no
+     `v<old>` tag exists** → retitle that heading to
+     `## [<bare>] — unreleased` (the pending notes simply get the new
+     number).
+   - The top section is the old version but **`v<old>` is tagged** → it
+     shipped. Give its heading the release date
+     (`gh release view v<old> --json publishedAt`, else the tagged
+     commit's date) and keep under it only what the tag actually
+     contains (compare `git show v<old>:CHANGELOG.md`); move work from
+     after the tag (`git log v<old>..HEAD`) into a new
+     `## [<bare>] — unreleased` section above it, filing behavior
+     changes to existing features under `### Changed`, not `### Added`.
    - Otherwise (top section is a dated, released version) → insert a new
      `## [<bare>] — unreleased` section above it, with a placeholder line
      for notes.
