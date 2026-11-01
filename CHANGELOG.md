@@ -21,7 +21,7 @@ on today's loudness standards as a single fast CLI.
   presets and explicit `--target`/`--ceiling` overrides.
 - True-peak limiting: a 4×-oversampled lookahead limiter guarantees the
   ceiling (−1.5 dBTP default) against intersample peaks.
-- Inputs: WAV, AIFF, FLAC, MP3, AAC/M4A, Ogg Vorbis; mono and stereo.
+- Inputs: WAV, AIFF, FLAC, MP3, AAC/M4A/M4B, Ogg Vorbis; mono and stereo.
   Outputs: WAV, FLAC, MP3 (via `lame`; one MP3 render caps at ~3 h of
   stereo), and M4B/M4A (AAC via `ffmpeg`; no length cap), with basic tags
   copied over.

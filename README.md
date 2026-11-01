@@ -31,7 +31,7 @@ episode.wav → episode.leveled.wav
   not merely near it, verified against the R128 gate.
 - **True-peak safe.** A 4×-oversampled lookahead limiter guarantees the ceiling
   (−1.5 dBTP by default) against intersample peaks.
-- **Formats.** Reads WAV, AIFF, FLAC, MP3, AAC/M4A, and Ogg Vorbis; writes WAV,
+- **Formats.** Reads WAV, AIFF, FLAC, MP3, AAC/M4A/M4B, and Ogg Vorbis; writes WAV,
   FLAC, MP3 (via the `lame` binary; one MP3 render caps at about 3 hours of
   stereo), and M4B/M4A (AAC via the `ffmpeg` binary; no length cap). Basic tags
   (title, artist, album, date, genre, comment, track) are copied over, and

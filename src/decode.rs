@@ -1,5 +1,5 @@
 //! Streaming decode of input audio via symphonia: WAV, AIFF, FLAC, MP3, AAC
-//! (and .m4a), and Ogg Vorbis — plus the basic text tags they carry.
+//! (and .m4a/.m4b), and Ogg Vorbis — plus the basic text tags they carry.
 
 use std::fs::File;
 use std::io::ErrorKind;

@@ -31,7 +31,7 @@ pipeline, distributed as a single static binary.
   LUFS, peaks in dBTP (true peak).
 - **Offline advantage.** Two-pass design with full lookahead — the reason the original
   sounded better than real-time AGC.
-- **Common formats in** (WAV, AIFF, FLAC, MP3, AAC/M4A, Ogg Vorbis); **WAV and FLAC out**,
+- **Common formats in** (WAV, AIFF, FLAC, MP3, AAC/M4A/M4B, Ogg Vorbis); **WAV and FLAC out**,
   plus MP3 when `lame` is installed and M4B/M4A (AAC, with chapter marks) when `ffmpeg` is.
 - **Fast and bounded.** ≥ 50× real-time; memory stays flat regardless of file length.
 - **Scriptable.** Meaningful exit codes, logs to stderr, `--json` stats, stdin/stdout
